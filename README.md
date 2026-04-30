@@ -88,7 +88,7 @@ Microphone → AudioWorklet (PCM capture) → VAD → AudioEncoder (Opus) → We
 | `public/maintenance.html` | Service maintenance page |
 | `.env` | Server configuration |
 
-## Deployment
+## Deployment 
 
 ### Option 1: Direct Run (Simple)
 
