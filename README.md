@@ -1,6 +1,6 @@
-# Multi-User Voice Chat - SFU Implementation
+# Multi-User Voice Meeting - SFU Implementation
 
-A Node.js implemented multi-user web voice chat app using SFU (Selective Forwarding Unit) architecture. Tech: WebSocket + WebCodecs (AudioEncoder/AudioDecoder) + AudioWorklet.
+A Node.js implemented multi-user web voice meeting app using SFU (Selective Forwarding Unit) architecture. Tech: WebSocket + WebCodecs (AudioEncoder/AudioDecoder) + AudioWorklet.
 
 ## Quick Start
 
