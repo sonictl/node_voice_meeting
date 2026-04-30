@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>语音会议 - 管理后台</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .container {
+            background: #2d2d2d;
+            padding: 28px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+            width: 450px;
+            max-width: 95vw;
+        }
+        h1 {
+            font-size: 20px;
+            text-align: center;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        .badge {
+            background: #d16969;
+            padding: 3px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: normal;
+        }
+        .form-group {
+            margin-bottom: 16px;
+        }
+        label {
+            display: block;
+            font-size: 13px;
+            color: #888;
+            margin-bottom: 6px;
+        }
+        input[type="password"] {
+            width: 100%;
+            background: #3d3d3d;
+            color: #d4d4d4;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 10px 12px;
+            font-size: 14px;
+            font-family: monospace;
+        }
+        input[type="password"]:focus {
+            outline: none;
+            border-color: #0e639c;
+        }
+        .btn-group {
+            display: flex;
+            gap: 8px;
+            margin-top: 16px;
+        }
+        button {
+            flex: 1;
+            background: #0e639c;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            cursor: pointer;
+            border-radius: 6px;
+            font-size: 15px;
+            transition: all 0.2s;
+            font-weight: 500;
+        }
+        button:hover:not(:disabled) {
+            background: #1177bb;
+            transform: translateY(-1px);
+        }
+        button:disabled {
+            background: #555;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+        .btn-stop {
+            background: #d16969;
+        }
+        .btn-stop:hover:not(:disabled) {
+            background: #e07b7b;
+        }
+        .btn-start {
+            background: #4caf50;
+        }
+        .btn-start:hover:not(:disabled) {
+            background: #5cbf60;
+        }
+        .status-bar {
+            background: #1e1e1e;
+            padding: 14px;
+            border-radius: 6px;
+            margin: 12px 0;
+            text-align: center;
+            font-size: 15px;
+            font-weight: bold;
+        }
+        .status-online {
+            color: #4caf50;
+        }
+        .status-offline {
+            color: #d16969;
+        }
+        .error-msg {
+            color: #d16969;
+            font-size: 13px;
+            margin-top: 8px;
+            text-align: center;
+        }
+        .success-msg {
+            color: #4caf50;
+            font-size: 13px;
+            margin-top: 8px;
+            text-align: center;
+        }
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            font-size: 13px;
+            border-bottom: 1px solid #3d3d3d;
+        }
+        .info-row:last-child {
+            border-bottom: none;
+        }
+        .info-label {
+            color: #888;
+        }
+        .info-value {
+            color: #d4d4d4;
+            font-family: monospace;
+        }
+        .footer {
+            text-align: center;
+            font-size: 11px;
+            color: #666;
+            margin-top: 16px;
+            border-top: 1px solid #3d3d3d;
+            padding-top: 12px;
+        }
+        .hidden {
+            display: none;
+        }
+        .login-section, .dashboard-section {
+            transition: opacity 0.3s;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>
+            🔐 管理后台
+            <span class="badge">管理员</span>
+        </h1>
+
+        <!-- 登录区域 -->
+        <div id="loginSection" class="login-section">
+            <div class="form-group">
+                <label>管理员密码</label>
+                <input type="password" id="passwordInput" placeholder="请输入管理员密码" onkeydown="if(event.key==='Enter') login()">
+            </div>
+            <button onclick="login()">🔑 验证身份</button>
+            <div id="loginError" class="error-msg hidden"></div>
+        </div>
+
+        <!-- 管理面板 -->
+        <div id="dashboardSection" class="dashboard-section hidden">
+            <div class="status-bar" id="serviceStatusBar">
+                <span id="serviceStatusText">检查中...</span>
+            </div>
+
+            <div class="info-row">
+                <span class="info-label">服务地址</span>
+                <span class="info-value" id="infoAddress">—</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">活跃房间</span>
+                <span class="info-value" id="infoRooms">—</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">在线用户</span>
+                <span class="info-value" id="infoPeers">—</span>
+            </div>
+
+            <div class="btn-group">
+                <button id="stopBtn" class="btn-stop" onclick="stopService()">⏹️ 关闭服务</button>
+                <button id="startBtn" class="btn-start hidden" onclick="startService()">▶️ 开启服务</button>
+            </div>
+
+            <div id="actionMsg" class="success-msg hidden"></div>
+        </div>
+
+        <div class="footer">
+            WebSocket + WebCodecs 多人语音会议系统
+        </div>
+    </div>
+
+    <script>
+        let isAuthenticated = false;
+        let statusInterval = null;
+
+        async function login() {
+            const password = document.getElementById('passwordInput').value;
+            const errorEl = document.getElementById('loginError');
+            
+            try {
+                const res = await fetch('/admin/api/auth', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password })
+                });
+                const data = await res.json();
+                
+                if (data.ok) {
+                    isAuthenticated = true;
+                    document.getElementById('loginSection').classList.add('hidden');
+                    document.getElementById('dashboardSection').classList.remove('hidden');
+                    errorEl.classList.add('hidden');
+                    loadStatus();
+                    statusInterval = setInterval(loadStatus, 3000);
+                } else {
+                    errorEl.textContent = '❌ 密码错误';
+                    errorEl.classList.remove('hidden');
+                }
+            } catch (err) {
+                errorEl.textContent = '❌ 连接失败: ' + err.message;
+                errorEl.classList.remove('hidden');
+            }
+        }
+
+        async function loadStatus() {
+            try {
+                const res = await fetch('/admin/api/status');
+                const data = await res.json();
+                
+                const statusText = document.getElementById('serviceStatusText');
+                const statusBar = document.getElementById('serviceStatusBar');
+                const stopBtn = document.getElementById('stopBtn');
+                const startBtn = document.getElementById('startBtn');
+
+                document.getElementById('infoAddress').textContent = data.address;
+                document.getElementById('infoRooms').textContent = data.rooms;
+                document.getElementById('infoPeers').textContent = data.peers;
+
+                if (data.serviceOn) {
+                    statusText.textContent = '🟢 服务运行中';
+                    statusBar.className = 'status-bar status-online';
+                    stopBtn.classList.remove('hidden');
+                    startBtn.classList.add('hidden');
+                } else {
+                    statusText.textContent = '🔴 服务已关闭';
+                    statusBar.className = 'status-bar status-offline';
+                    stopBtn.classList.add('hidden');
+                    startBtn.classList.remove('hidden');
+                }
+            } catch (err) {
+                console.error('[Admin] Status error:', err);
+            }
+        }
+
+        async function stopService() {
+            if (!confirm('确定要关闭语音会议服务吗？所有在线用户将被断开。')) return;
+            try {
+                const res = await fetch('/admin/api/stop', { method: 'POST' });
+                const data = await res.json();
+                showActionMsg(data.ok ? '✅ 服务已关闭' : '❌ ' + (data.message || '操作失败'));
+                if (data.ok) loadStatus();
+            } catch (err) {
+                showActionMsg('❌ 操作失败: ' + err.message);
+            }
+        }
+
+        async function startService() {
+            try {
+                const res = await fetch('/admin/api/start', { method: 'POST' });
+                const data = await res.json();
+                showActionMsg(data.ok ? '✅ 服务已开启' : '❌ ' + (data.message || '操作失败'));
+                if (data.ok) loadStatus();
+            } catch (err) {
+                showActionMsg('❌ 操作失败: ' + err.message);
+            }
+        }
+
+        function showActionMsg(msg) {
+            const el = document.getElementById('actionMsg');
+            el.textContent = msg;
+            el.classList.remove('hidden');
+            setTimeout(() => el.classList.add('hidden'), 3000);
+        }
+    </script>
+</body>
+</html>

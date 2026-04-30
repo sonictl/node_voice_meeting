@@ -50,14 +50,16 @@ const VOICE_APP = (() => {
 
     let isInitializing = false;
     let isJoined = false;
+    let isMuted = false; // 麦克风静音状态
 
     // UI 元素
-    let statusEl, peersListEl, debugInfoEl, myPeerIdEl, roomStatusEl, peerPeerIdEl, peerInfoSectionEl, roomIdDisplayEl;
+    let statusEl, peersListEl, debugInfoEl, myPeerIdEl, roomStatusEl, roomIdDisplayEl;
     let configSectionEl, roomConfigInfoEl, roomConfigDetailsEl;
     let configSampleRateEl, configBitrateEl, configFrameDurationEl, configJitterEl;
+    let muteBtnEl;
 
     // =============================================
-    // 房间状态管理
+    // 房间状态管理 (SFU: 支持多用户)
     // =============================================
     function updateRoomStatus() {
         if (!roomStatusEl) return;
@@ -66,9 +68,9 @@ const VOICE_APP = (() => {
         if (!isJoined) {
             roomStatusEl.innerHTML = '<span class="room-status waiting">☎️ 未加入通话...</span>';
         } else if (peerCount === 1) {
-            roomStatusEl.innerHTML = '<span class="room-status waiting">⏳ 等待对方加入...</span>';
-        } else if (peerCount === 2) {
-            roomStatusEl.innerHTML = '<span class="room-status active">🟢 1v1通话中...</span>';
+            roomStatusEl.innerHTML = '<span class="room-status waiting">⏳ 等待其他人加入...</span>';
+        } else {
+            roomStatusEl.innerHTML = `<span class="room-status active">🟢 多人通话中 (${peerCount}人)</span>`;
         }
     }
 
@@ -132,7 +134,7 @@ const VOICE_APP = (() => {
                 myPeerId = msg.peerId;
                 myPeerIdEl.textContent = myPeerId;
                 isJoined = true;
-                setStatus(`🎙️ 已加入1v1通话房间 (${msg.roomId})`, '#4caf50');
+                setStatus(`🎙️ 已加入多人通话房间 (${msg.roomId})`, '#4caf50');
 
                 // 应用服务端下发的编解码配置
                 if (msg.codecConfig) {
@@ -170,7 +172,7 @@ const VOICE_APP = (() => {
                 console.error('[Server]', msg.message);
                 setStatus(`⚠️ ${msg.message}`, '#ffa500');
                 // 如果是房间已满错误，恢复按钮状态
-                if (msg.message.includes('1v1通话房间已满')) {
+                if (msg.message.includes('通话房间已满')) {
                     document.getElementById('joinBtn').disabled = false;
                     document.getElementById('joinBtn').textContent = '📞 加入通话';
                     document.getElementById('leaveBtn').disabled = true;
@@ -206,12 +208,59 @@ const VOICE_APP = (() => {
     }
 
     // =============================================
+    // 说话人指示器状态
+    // =============================================
+    let speakerActivity = new Map(); // peerId -> { lastActiveTime, energy }
+    const SPEAKER_TIMEOUT_MS = 800; // 超过此时间无音频则视为停止说话
+
+    /**
+     * 更新说话人指示器
+     * 在解码输出时调用，记录该 peer 最近有音频活动
+     */
+    function updateSpeakerActivity(peerId) {
+        speakerActivity.set(peerId, Date.now());
+        updateSpeakerIndicators();
+    }
+
+    /**
+     * 定期检查说话人状态，更新 UI
+     */
+    function updateSpeakerIndicators() {
+        const now = Date.now();
+        for (const [pid, peerData] of roomPeers) {
+            const lastActive = speakerActivity.get(pid) || 0;
+            const isSpeaking = (now - lastActive) < SPEAKER_TIMEOUT_MS;
+            const peerEl = document.getElementById(`peer-${pid}`);
+            if (peerEl) {
+                const statusSpan = peerEl.querySelector('.peer-status');
+                if (statusSpan) {
+                    if (isSpeaking) {
+                        statusSpan.innerHTML = '🔊 说话中';
+                        statusSpan.className = 'peer-status speaking';
+                        peerEl.classList.add('speaking');
+                    } else {
+                        statusSpan.innerHTML = '🟢 在线';
+                        statusSpan.className = 'peer-status';
+                        peerEl.classList.remove('speaking');
+                    }
+                }
+            }
+        }
+    }
+
+    // 每秒检查一次说话人状态
+    setInterval(() => {
+        if (isJoined) updateSpeakerIndicators();
+    }, 300);
+
+    // =============================================
     // Peer 管理
     // =============================================
     function addPeer(peerId) {
         if (peerId === myPeerId) return;
         if (roomPeers.has(peerId)) return;
         roomPeers.set(peerId, { firstSeq: -1, lastPacketTime: 0 });
+        speakerActivity.set(peerId, 0);
         addPeerToList(peerId);
         updatePeerInfoSection();
         updateRoomStatus();
@@ -220,6 +269,18 @@ const VOICE_APP = (() => {
 
     function removePeer(peerId) {
         roomPeers.delete(peerId);
+        speakerActivity.delete(peerId);
+
+        // SFU: 清理此peer的解码器
+        if (peerDecoders.has(peerId)) {
+            const decoder = peerDecoders.get(peerId);
+            if (decoder.state === 'configured') {
+                decoder.close();
+            }
+            peerDecoders.delete(peerId);
+            console.log(`[PEER] Cleaned up decoder for ${peerId}`);
+        }
+
         removePeerFromList(peerId);
         updatePeerInfoSection();
         updateRoomStatus();
@@ -227,19 +288,11 @@ const VOICE_APP = (() => {
     }
 
     // =============================================
-    // 通话对方信息显示
+    // 成员列表显示
     // =============================================
     function updatePeerInfoSection() {
-        if (!peerInfoSectionEl || !peerPeerIdEl) return;
-        // 通话中：显示对方ID（排除自己后，取第一个peer）
-        const peers = Array.from(roomPeers.keys()).filter(pid => pid !== myPeerId);
-        if (peers.length > 0 && isJoined) {
-            peerInfoSectionEl.style.display = 'flex';
-            peerPeerIdEl.textContent = peers[0];
-        } else {
-            peerInfoSectionEl.style.display = 'none';
-            peerPeerIdEl.textContent = '—';
-        }
+        // 成员列表由 addPeerToList / removePeerFromList 维护
+        // 此函数仅用于触发 UI 更新
     }
 
     // =============================================
@@ -264,6 +317,12 @@ const VOICE_APP = (() => {
             const data = event.data;
 
             if (data.type === 'pcm') {
+                // VAD: 如果检测到静音且没有挂起，跳过编码和发送
+                if (data.hasVoice === false) {
+                    // 静音帧：不编码、不发送，节省带宽
+                    return;
+                }
+
                 // 收到麦克风 PCM → 编码 → 发送
                 if (!encoder || encoder.state !== 'configured') return;
 
@@ -380,6 +439,41 @@ const VOICE_APP = (() => {
         // SFU: Decoders created per peer, not globally
         console.log('[Codec] WebCodecs Encoder ready (decoders created per peer)');
     }
+
+    // =============================================
+    // SFU: 为每个peer创建解码器
+    // =============================================
+    function createPeerDecoder(peerId) {
+        const decoder = new AudioDecoder({
+            output: (audioData) => {
+                // 解码完成 → 发送 PCM 到 Worklet 播放 (带peerId标识)
+                if (workletNode) {
+                    const pcmData = new Float32Array(audioData.numberOfFrames);
+                    audioData.copyTo(pcmData, { planeIndex: 0 });
+                    console.log(`[Decode:${peerId}] frames=${audioData.numberOfFrames}, sampleRate=${audioData.sampleRate}`);
+                    workletNode.port.postMessage({
+                        type: 'pcm',
+                        peerId: peerId,
+                        data: pcmData
+                    });
+                    // 说话人指示器：解码到音频数据说明此 peer 正在说话
+                    updateSpeakerActivity(peerId);
+                }
+                audioData.close();
+            },
+            error: (e) => {
+                console.error(`[Decoder:${peerId}] Error:`, e.message);
+            }
+        });
+
+        decoder.configure({
+            codec: 'opus',
+            sampleRate: CONFIG.sampleRate,
+            numberOfChannels: 1
+        });
+
+        console.log(`[Decoder:${peerId}] state=${decoder.state}`);
+        return decoder;
     }
 
     // =============================================
@@ -390,21 +484,12 @@ const VOICE_APP = (() => {
         isInitializing = true;
 
         try {
-            setStatus('🔄 初始化 WebCodecs 编解码器...', '#888');
-            await initCodec();
-
-            setStatus('🔄 初始化音频系统...', '#888');
-            await initAudio();
-
-            setStatus('🔄 启动麦克风...', '#888');
-            await startMicrophone();
-
             setStatus('🔄 连接信令服务器...', '#888');
             await connectWebSocket();
 
-            setStatus('🔄 加入1v1通话房间...', '#888');
+            setStatus('🔄 加入多人通话房间...', '#888');
 
-            // 读取用户选择的编解码配置，发送给服务端
+            // 先发送 join 请求，等待服务端返回房间配置
             const userCodecConfig = getSelectedConfig();
             ws.send(JSON.stringify({
                 type: 'join',
@@ -413,9 +498,55 @@ const VOICE_APP = (() => {
                 codecConfig: userCodecConfig
             }));
 
+            // 等待 joined 消息，获取服务端下发的房间配置
+            const roomConfig = await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error('加入超时')), 10000);
+                const origHandler = ws.onmessage;
+                ws.onmessage = (event) => {
+                    if (event.data instanceof ArrayBuffer) return;
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.type === 'joined') {
+                            clearTimeout(timeout);
+                            // 恢复原始消息处理器
+                            ws.onmessage = origHandler;
+                            // 先处理 joined 消息
+                            handleSignal(msg);
+                            resolve(msg.codecConfig || userCodecConfig);
+                        } else if (msg.type === 'error') {
+                            clearTimeout(timeout);
+                            ws.onmessage = origHandler;
+                            reject(new Error(msg.message));
+                        }
+                    } catch(e) {}
+                };
+            });
+
+            // 使用服务端下发的房间配置初始化编解码器
+            setStatus('🔄 初始化 WebCodecs 编解码器...', '#888');
+            CONFIG.sampleRate = roomConfig.sampleRate || CONFIG.sampleRate;
+            CONFIG.opusBitrate = roomConfig.opusBitrate || CONFIG.opusBitrate;
+            CONFIG.frameDuration = roomConfig.frameDuration || CONFIG.frameDuration;
+            CONFIG.jitterBufferFrames = roomConfig.jitterBufferFrames || CONFIG.jitterBufferFrames;
+            await initCodec();
+
+            setStatus('🔄 初始化音频系统...', '#888');
+            await initAudio();
+
+            setStatus('🔄 启动麦克风...', '#888');
+            await startMicrophone();
+
             document.getElementById('joinBtn').disabled = true;
             document.getElementById('joinBtn').textContent = '✅ 已加入';
             document.getElementById('leaveBtn').disabled = false;
+
+            // 显示麦克风控制按钮
+            if (muteBtnEl) {
+                muteBtnEl.style.display = '';
+                muteBtnEl.disabled = false;
+                muteBtnEl.textContent = '🎤 麦克风开';
+                muteBtnEl.className = 'btn-mute';
+            }
 
             // 锁定配置面板（通话中不可修改）
             enableConfigUI(false);
@@ -432,6 +563,35 @@ const VOICE_APP = (() => {
     }
 
     // =============================================
+    // 麦克风静音/取消静音
+    // =============================================
+    function toggleMute() {
+        if (!audioCtx || !workletNode || !micSource) return;
+
+        isMuted = !isMuted;
+
+        if (isMuted) {
+            // 静音：断开麦克风与 Worklet 的连接，停止采集
+            try { micSource.disconnect(workletNode); } catch(e) {}
+            if (muteBtnEl) {
+                muteBtnEl.textContent = '🔇 麦克风关';
+                muteBtnEl.className = 'btn-mute muted';
+            }
+            setStatus('🔇 麦克风已静音，仅收听', '#ffa500');
+            console.log('[Mic] Muted');
+        } else {
+            // 取消静音：重新连接麦克风到 Worklet
+            micSource.connect(workletNode);
+            if (muteBtnEl) {
+                muteBtnEl.textContent = '🎤 麦克风开';
+                muteBtnEl.className = 'btn-mute';
+            }
+            setStatus('🎙️ 麦克风已开启', '#4caf50');
+            console.log('[Mic] Unmuted');
+        }
+    }
+
+    // =============================================
     // 离开房间
     // =============================================
     function leaveRoom() {
@@ -439,7 +599,7 @@ const VOICE_APP = (() => {
             ws.send(JSON.stringify({ type: 'leave' }));
         }
         cleanup();
-        setStatus('⚡ 当前状态：未加入1v1通话房间', '#d4d4d4');
+        setStatus('⚡ 当前状态：未加入通话房间', '#d4d4d4');
         document.getElementById('joinBtn').disabled = false;
         document.getElementById('joinBtn').textContent = '📞 加入通话';
         document.getElementById('leaveBtn').disabled = true;
@@ -452,6 +612,9 @@ const VOICE_APP = (() => {
         if (roomConfigInfoEl) roomConfigInfoEl.style.display = 'none';
         // 恢复配置面板显示（下次加入时可重新选择）
         if (configSectionEl) configSectionEl.style.display = 'block';
+        // 隐藏麦克风控制按钮
+        if (muteBtnEl) muteBtnEl.style.display = 'none';
+        isMuted = false;
     }
 
     // =============================================
@@ -486,10 +649,11 @@ const VOICE_APP = (() => {
             if (encoder.state !== 'closed') encoder.close();
             encoder = null;
         }
-        if (decoder) {
+        // SFU: 清理所有peer解码器
+        for (const [peerId, decoder] of peerDecoders) {
             if (decoder.state !== 'closed') decoder.close();
-            decoder = null;
         }
+        peerDecoders.clear();
         if (workletNode) {
             workletNode.port.postMessage({ type: 'reset' });
             workletNode.disconnect();
@@ -533,24 +697,52 @@ const VOICE_APP = (() => {
     }
 
     // =============================================
-    // Opus 音频包处理
+    // SFU: 多用户音频包处理
     // =============================================
     function handleAudioPacket(data) {
-        if (!decoder || decoder.state !== 'configured') return;
+        // SFU 数据包格式: [发送者ID长度2B][发送者ID字节][采样率2B][序号2B][时间戳4B][Opus数据]
+        if (data.length <= 10) return; // 没有音频数据
 
-        // 二进制包格式: [采样率2B][序号2B][时间戳4B][Opus数据]
-        if (data.length <= 8) return; // 没有音频数据
+        // 修复: 使用 data.buffer 构造 DataView 时，必须考虑 byteOffset
+        // 但更安全的方式是直接操作 Uint8Array 并手动解析
+        let offset = 0;
+        const senderIdLength = (data[offset] | (data[offset + 1] << 8));
+        offset += 2;
+        const senderId = new TextDecoder().decode(data.subarray(offset, offset + senderIdLength));
+        offset += senderIdLength;
 
-        const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-        const sampleRate = view.getUint16(0, true);
-        const packetSeq = view.getUint16(2, true);
-        const timestamp = view.getUint32(4, true);
-        const opusData = data.subarray(8);
+        // 跳过发送者ID，获取原始音频包
+        const audioData = data.subarray(offset);
+        if (audioData.length <= 8) return;
+
+        // 修复: 从 audioData 复制到新 Uint8Array 以确保 DataView 对齐
+        const alignedBuf = new Uint8Array(8);
+        alignedBuf[0] = audioData[0];
+        alignedBuf[1] = audioData[1];
+        alignedBuf[2] = audioData[2];
+        alignedBuf[3] = audioData[3];
+        alignedBuf[4] = audioData[4];
+        alignedBuf[5] = audioData[5];
+        alignedBuf[6] = audioData[6];
+        alignedBuf[7] = audioData[7];
+        const sampleRate = alignedBuf[0] | (alignedBuf[1] << 8);
+        const packetSeq = alignedBuf[2] | (alignedBuf[3] << 8);
+        const timestamp = (alignedBuf[4] | (alignedBuf[5] << 8) | (alignedBuf[6] << 16) | (alignedBuf[7] << 24)) >>> 0;
+        const opusData = audioData.subarray(8);
 
         stats.packetsRecv++;
         stats.bytesRecv += data.length;
 
-        console.log(`[Recv] seq=${packetSeq}, opusLen=${opusData.length}, ts=${timestamp}`);
+        console.log(`[Recv:${senderId}] seq=${packetSeq}, opusLen=${opusData.length}, ts=${timestamp}`);
+
+        // 获取或创建此peer的解码器
+        let decoder = peerDecoders.get(senderId);
+        if (!decoder) {
+            decoder = createPeerDecoder(senderId);
+            peerDecoders.set(senderId, decoder);
+        }
+
+        if (decoder.state !== 'configured') return;
 
         // 创建 EncodedAudioChunk 解码
         const chunk = new EncodedAudioChunk({
@@ -716,8 +908,6 @@ const VOICE_APP = (() => {
         peersListEl = document.getElementById('peersList');
         myPeerIdEl = document.getElementById('myPeerId');
         roomStatusEl = document.getElementById('roomStatus');
-        peerPeerIdEl = document.getElementById('peerPeerId');
-        peerInfoSectionEl = document.getElementById('peerInfoSection');
         roomIdDisplayEl = document.getElementById('roomIdDisplay');
         configSectionEl = document.getElementById('configSection');
         roomConfigInfoEl = document.getElementById('roomConfigInfo');
@@ -729,6 +919,10 @@ const VOICE_APP = (() => {
 
         document.getElementById('joinBtn').onclick = joinRoom;
         document.getElementById('leaveBtn').onclick = leaveRoom;
+    muteBtnEl = document.getElementById('muteBtn');
+    if (muteBtnEl) {
+        muteBtnEl.onclick = toggleMute;
+    }
 
         // 预设模式按钮
         document.querySelectorAll('.preset-btn').forEach(btn => {

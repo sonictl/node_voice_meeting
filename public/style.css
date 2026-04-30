@@ -156,23 +156,41 @@
             display: inline-flex;
             align-items: center;
             gap: 4px;
+            transition: all 0.2s ease;
+            border: 1px solid transparent;
+        }
+        .peer-item.speaking {
+            background: #1a3a1a;
+            border-color: #4caf50;
+            box-shadow: 0 0 8px rgba(76, 175, 80, 0.3);
+            animation: pulse-border 1s ease-in-out infinite;
+        }
+        .peer-status.speaking {
+            color: #4caf50;
+            font-weight: bold;
+        }
+        @keyframes pulse-border {
+            0%, 100% { box-shadow: 0 0 4px rgba(76, 175, 80, 0.2); }
+            50% { box-shadow: 0 0 12px rgba(76, 175, 80, 0.5); }
         }
         .btn-group {
             display: flex;
-            gap: 8px;
+            gap: 6px;
             margin-top: 14px;
         }
         button {
             flex: 1;
+            min-width: 0;
             background: #0e639c;
             color: white;
             border: none;
-            padding: 14px 20px;
+            padding: 12px 8px;
             cursor: pointer;
             border-radius: 6px;
-            font-size: 16px;
+            font-size: 14px;
             transition: all 0.2s;
             font-weight: 500;
+            white-space: nowrap;
         }
         button:hover:not(:disabled) {
             background: #1177bb;
@@ -187,6 +205,18 @@
             background: #d16969;
         }
         #leaveBtn:hover:not(:disabled) {
+            background: #e07b7b;
+        }
+        .btn-mute {
+            background: #4caf50;
+        }
+        .btn-mute:hover:not(:disabled) {
+            background: #5cbf60;
+        }
+        .btn-mute.muted {
+            background: #d16969;
+        }
+        .btn-mute.muted:hover:not(:disabled) {
             background: #e07b7b;
         }
         #debugPanel {

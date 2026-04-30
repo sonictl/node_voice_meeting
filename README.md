@@ -1,6 +1,6 @@
-# a light weight 1v1voiceChat node web application
+# Multi-User Voice Chat - SFU Implementation
 
-A Node.js implemented 1v1 web voice chat app. Tech: WebSocket + WebCodecs (AudioEncoder/AudioDecoder) + AudioWorklet.
+A Node.js implemented multi-user web voice chat app using SFU (Selective Forwarding Unit) architecture. Tech: WebSocket + WebCodecs (AudioEncoder/AudioDecoder) + AudioWorklet.
 
 ## Quick Start
 
@@ -9,13 +9,13 @@ npm install
 npm start
 ```
 
-Open `http://localhost:4001` — auto-redirects to a random room. Share the URL to invite others.
+Open `http://localhost:4001` — auto-redirects to a random room. Share the URL to invite multiple participants.
 
 ## Usage
 
 1. **Open the page** — auto-assigned to a room (e.g. `/a3xk`)
 2. **Choose codec preset** (optional) — 🚀 Low Latency / ⚖️ Balanced / 🎵 High Quality / 📡 Weak Network
-3. **Click "📞 加入通话"** — audio encoded with Opus, relayed via WebSocket, decoded in real-time
+3. **Click "📞 加入通话"** — audio encoded with Opus, relayed via WebSocket SFU, decoded in real-time
 4. **Click "❌ 退出通话"** to end the call
 
 > **Note**: First joiner decides the codec config. Late joiners auto-sync and see config read-only.
@@ -27,20 +27,20 @@ Open `http://localhost:4001` — auto-redirects to a random room. Share the URL 
 - **Max rooms limit** — configurable via `.env` (`MAX_ROOMS=10`)
 - **Room idle timeout** — auto-destroy empty rooms (`ROOM_IDLE_TIMEOUT=300s`)
 - **Codec config sync** — first joiner's config synced to late joiners via server
-- **1v1 only** — each room supports exactly 2 peers
+- **SFU Multi-user** — unlimited participants per room with efficient server bandwidth usage
 
 ## How It Works
 
 ```
-Microphone → AudioWorklet (PCM capture) → AudioEncoder (Opus) → WebSocket Relay → AudioDecoder (Opus) → AudioWorklet (Ring Buffer) → Speaker
+Microphone → AudioWorklet (PCM capture) → AudioEncoder (Opus) → WebSocket SFU → AudioDecoder (Opus) → AudioWorklet (Mix) → Speaker
 ```
 
 - **Capture**: `AudioWorkletProcessor` captures microphone PCM in configurable frames
 - **Encoder**: `AudioEncoder` (WebCodecs) encodes PCM → Opus
-- **Network**: 8-byte header (sampleRate + seq + timestamp) + Opus payload over WebSocket
-- **Decoder**: `AudioDecoder` (WebCodecs) decodes Opus → PCM Float32
-- **Playback**: Ring buffer in AudioWorklet with underrun protection
-- **Server**: Zero-copy relay, room-based broadcasting, idle timeout cleanup
+- **Network**: SFU packet format [senderIdLength(2B)][senderId][sampleRate(2B)][seq(2B)][timestamp(4B)][Opus] over WebSocket
+- **Decoder**: `AudioDecoder` (WebCodecs) decodes Opus → PCM Float32 (one decoder per participant)
+- **Playback**: AudioWorklet mixes audio from all participants with separate ring buffers
+- **Server**: SFU relay - forwards packets to all participants except sender, minimal processing
 
 ## Configuration
 

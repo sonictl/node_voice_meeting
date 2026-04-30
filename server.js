@@ -1,6 +1,6 @@
 // =============================================
 // WebSocket + WebCodecs 语音中继服务器
-// 多房间 · URL路径即房间ID · 自动资源回收
+// 路由: / → 语音会议页面, /admin → 管理后台
 // =============================================
 const http = require('http');
 const fs = require('fs');
@@ -14,8 +14,7 @@ function loadEnv() {
     const envFile = path.join(__dirname, '.env');
     const config = {
         PORT: 4001,
-        MAX_ROOMS: 10,
-        ROOM_IDLE_TIMEOUT: 300
+        ADMIN_PASSWORD: 'admin123'
     };
     try {
         const content = fs.readFileSync(envFile, 'utf-8');
@@ -38,8 +37,7 @@ function loadEnv() {
 
 const ENV = loadEnv();
 const PORT = ENV.PORT;
-const MAX_ROOMS = ENV.MAX_ROOMS;
-const ROOM_IDLE_TIMEOUT_MS = ENV.ROOM_IDLE_TIMEOUT * 1000;
+const ADMIN_PASSWORD = String(ENV.ADMIN_PASSWORD);
 
 const MIME_TYPES = {
     '.html': 'text/html',
@@ -50,16 +48,9 @@ const MIME_TYPES = {
 };
 
 // =============================================
-// 生成随机4位字母数字房间ID
+// 服务开关状态
 // =============================================
-function generateRoomId() {
-    const chars = 'abcdefghijkmnpqrstuvwxyz23456789';
-    let id = '';
-    for (let i = 0; i < 4; i++) {
-        id += chars[Math.floor(Math.random() * chars.length)];
-    }
-    return id;
-}
+let serviceOn = true;
 
 // =============================================
 // HTTP 静态文件服务器
@@ -67,56 +58,94 @@ function generateRoomId() {
 const server = http.createServer((req, res) => {
     const url = req.url;
 
-    // 根路径：生成随机房间ID并重定向
+    // ---- 根路由: 直接返回语音会议页面 ----
     if (url === '/') {
-        const roomId = generateRoomId();
-        console.log(`[REDIRECT] / -> /${roomId}`);
-        res.writeHead(302, { 'Location': `/${roomId}` });
-        res.end();
-        return;
-    }
-
-    // 去掉查询参数（支持 ?v=N 缓存破坏）
-    const cleanUrl = url.split('?')[0];
-    const ext = path.extname(cleanUrl);
-    if (!MIME_TYPES[ext]) {
-        // 提取房间ID用于页面显示
-        const roomId = url.slice(1).split('/')[0] || 'default';
-        let filePath = path.join(__dirname, 'public', 'index.html');
-
-        // 安全：防止目录穿越
-        const normalizedPath = path.normalize(filePath);
-        if (!normalizedPath.startsWith(path.join(__dirname, 'public'))) {
-            res.writeHead(403);
-            res.end('Forbidden');
+        if (!serviceOn) {
+            serveMaintenancePage(res);
             return;
         }
-
-        fs.readFile(filePath, 'utf-8', (err, data) => {
-            if (err) {
-                res.writeHead(404);
-                res.end('404 Not Found');
-                return;
-            }
-            // 将房间ID注入到HTML中，供前端JS读取
-            const injected = data.replace(
-                '</head>',
-                `<script>window.__ROOM_ID__ = ${JSON.stringify(roomId)};</script>\n</head>`
-            );
-            res.writeHead(200, {
-                'Content-Type': 'text/html',
-                'Cross-Origin-Opener-Policy': 'same-origin',
-                'Cross-Origin-Embedder-Policy': 'require-corp'
-            });
-            res.end(injected);
-        });
+        serveIndexPage(res);
         return;
     }
 
-    // 静态文件服务（使用去掉查询参数的路径）
+    // ---- /admin 管理后台 ----
+    if (url === '/admin') {
+        serveAdminPage(res);
+        return;
+    }
+
+    // ---- /admin/api/* API 接口 ----
+    if (url.startsWith('/admin/api/')) {
+        handleAdminAPI(req, res);
+        return;
+    }
+
+    // ---- 静态文件服务 ----
+    serveStaticFile(url, res);
+});
+
+// =============================================
+// 页面服务函数
+// =============================================
+function serveIndexPage(res) {
+    const filePath = path.join(__dirname, 'public', 'index.html');
+    fs.readFile(filePath, 'utf-8', (err, data) => {
+        if (err) {
+            res.writeHead(500);
+            res.end('Internal Server Error');
+            return;
+        }
+        const injected = data.replace(
+            '</head>',
+            `<script>window.__ROOM_ID__ = ${JSON.stringify('default')};</script>\n</head>`
+        );
+        res.writeHead(200, {
+            'Content-Type': 'text/html',
+            'Cross-Origin-Opener-Policy': 'same-origin',
+            'Cross-Origin-Embedder-Policy': 'require-corp'
+        });
+        res.end(injected);
+    });
+}
+
+function serveMaintenancePage(res) {
+    const filePath = path.join(__dirname, 'public', 'maintenance.html');
+    fs.readFile(filePath, (err, data) => {
+        if (err) {
+            res.writeHead(500);
+            res.end('Internal Server Error');
+            return;
+        }
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(data);
+    });
+}
+
+function serveAdminPage(res) {
+    const filePath = path.join(__dirname, 'public', 'admin.html');
+    fs.readFile(filePath, (err, data) => {
+        if (err) {
+            res.writeHead(500);
+            res.end('Internal Server Error');
+            return;
+        }
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(data);
+    });
+}
+
+function serveStaticFile(url, res) {
+    const cleanUrl = url.split('?')[0];
+    const ext = path.extname(cleanUrl);
+
+    if (!MIME_TYPES[ext]) {
+        res.writeHead(404);
+        res.end('Not Found');
+        return;
+    }
+
     let filePath = path.join(__dirname, 'public', cleanUrl);
 
-    // 安全：防止目录穿越
     const normalizedPath = path.normalize(filePath);
     if (!normalizedPath.startsWith(path.join(__dirname, 'public'))) {
         res.writeHead(403);
@@ -129,7 +158,7 @@ const server = http.createServer((req, res) => {
     fs.readFile(filePath, (err, data) => {
         if (err) {
             res.writeHead(404);
-            res.end('404 Not Found');
+            res.end('Not Found');
             return;
         }
         res.writeHead(200, {
@@ -139,7 +168,88 @@ const server = http.createServer((req, res) => {
         });
         res.end(data);
     });
-});
+}
+
+// =============================================
+// Admin API 处理
+// =============================================
+function handleAdminAPI(req, res) {
+    const url = req.url;
+
+    function jsonResponse(statusCode, data) {
+        res.writeHead(statusCode, {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        });
+        res.end(JSON.stringify(data));
+    }
+
+    // ---- 认证 ----
+    if (url === '/admin/api/auth' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+            try {
+                const { password } = JSON.parse(body);
+                if (password === ADMIN_PASSWORD) {
+                    jsonResponse(200, { ok: true });
+                } else {
+                    jsonResponse(200, { ok: false, message: '密码错误' });
+                }
+            } catch (e) {
+                jsonResponse(400, { ok: false, message: '请求格式错误' });
+            }
+        });
+        return;
+    }
+
+    // ---- 获取状态 ----
+    if (url === '/admin/api/status') {
+        jsonResponse(200, {
+            serviceOn,
+            address: `http://localhost:${PORT}`,
+            rooms: rooms.size,
+            peers: peers.size
+        });
+        return;
+    }
+
+    // ---- 关闭服务 ----
+    if (url === '/admin/api/stop' && req.method === 'POST') {
+        if (!serviceOn) {
+            jsonResponse(200, { ok: false, message: '服务已经关闭' });
+            return;
+        }
+        serviceOn = false;
+
+        wss.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.close(1001, '服务维护中');
+            }
+        });
+
+        rooms.clear();
+        peers.clear();
+
+        console.log('[ADMIN] Service stopped by admin');
+        jsonResponse(200, { ok: true, message: '服务已关闭' });
+        return;
+    }
+
+    // ---- 开启服务 ----
+    if (url === '/admin/api/start' && req.method === 'POST') {
+        if (serviceOn) {
+            jsonResponse(200, { ok: false, message: '服务已经开启' });
+            return;
+        }
+        serviceOn = true;
+        console.log('[ADMIN] Service started by admin');
+        jsonResponse(200, { ok: true, message: '服务已开启' });
+        return;
+    }
+
+    jsonResponse(404, { ok: false, message: '未知 API' });
+}
 
 // =============================================
 // WebSocket 服务器
@@ -147,7 +257,7 @@ const server = http.createServer((req, res) => {
 const WebSocket = require('ws');
 const wss = new WebSocket.Server({
     server,
-    maxPayload: 1024 * 1024 // 1MB max per message
+    maxPayload: 1024 * 1024
 });
 
 // =============================================
@@ -163,46 +273,8 @@ const DEFAULT_CODEC_CONFIG = {
 // =============================================
 // 房间状态
 // =============================================
-const rooms = new Map();   // roomId -> { peers: Set<peerId>, timer: timeoutId, codecConfig: {} }
+const rooms = new Map();   // roomId -> { peers: Set<peerId>, codecConfig: {} }
 const peers = new Map();   // peerId -> { ws, roomId }
-
-// =============================================
-// 房间空闲超时管理
-// =============================================
-function scheduleRoomCleanup(roomId) {
-    const room = rooms.get(roomId);
-    if (!room) return;
-
-    // 清除已有的定时器
-    if (room.timer) {
-        clearTimeout(room.timer);
-        room.timer = null;
-    }
-
-    // 如果房间有用户，不设置定时器
-    if (room.peers.size > 0) return;
-
-    // 设置空闲超时自动销毁
-    room.timer = setTimeout(() => {
-        if (rooms.has(roomId)) {
-            const r = rooms.get(roomId);
-            if (r.peers.size === 0) {
-                rooms.delete(roomId);
-                console.log(`[ROOM] Room "${roomId}" auto-destroyed after ${ENV.ROOM_IDLE_TIMEOUT} seconds idle timeout`);
-            }
-        }
-    }, ROOM_IDLE_TIMEOUT_MS);
-
-    console.log(`[ROOM] Room "${roomId}" idle timer set (${ENV.ROOM_IDLE_TIMEOUT}s)`);
-}
-
-function cancelRoomCleanup(roomId) {
-    const room = rooms.get(roomId);
-    if (room && room.timer) {
-        clearTimeout(room.timer);
-        room.timer = null;
-    }
-}
 
 // =============================================
 // WebSocket 事件处理
@@ -210,6 +282,16 @@ function cancelRoomCleanup(roomId) {
 wss.on('connection', (ws) => {
     let peerId = null;
     let roomId = null;
+
+    // ---- 检查服务是否开启 ----
+    if (!serviceOn) {
+        ws.send(JSON.stringify({
+            type: 'error',
+            message: '语音会议服务维护中...'
+        }));
+        ws.close(1001, '服务维护中');
+        return;
+    }
 
     // ---- 消息处理 ----
     ws.on('message', (data, isBinary) => {
@@ -263,17 +345,6 @@ function handleJoin(ws, msg, oldPeerId, oldRoomId) {
     const newPeerId = msg.peerId || uuidv4().slice(0, 4);
     const newRoomId = msg.roomId || 'default';
 
-    // ---- 检查最大房间数限制 ----
-    // 如果房间不存在，检查是否已达到 MAX_ROOMS
-    if (!rooms.has(newRoomId) && rooms.size >= MAX_ROOMS) {
-        ws.send(JSON.stringify({
-            type: 'error',
-            message: `❌ 服务器已达最大房间数限制 (${MAX_ROOMS})，无法创建新房间`
-        }));
-        console.log(`[REJECT] Max rooms (${MAX_ROOMS}) reached, cannot create room "${newRoomId}"`);
-        return { peerId: null, roomId: null };
-    }
-
     // 确保 peerId 在房间内唯一
     const finalPeerId = ensureUniquePeerId(newRoomId, newPeerId);
 
@@ -281,25 +352,18 @@ function handleJoin(ws, msg, oldPeerId, oldRoomId) {
     if (!rooms.has(newRoomId)) {
         const userConfig = msg.codecConfig || {};
         const roomConfig = { ...DEFAULT_CODEC_CONFIG, ...userConfig };
-        rooms.set(newRoomId, { peers: new Set(), timer: null, codecConfig: roomConfig });
+        rooms.set(newRoomId, { peers: new Set(), codecConfig: roomConfig });
         console.log(`[CONFIG] Room "${newRoomId}" codec config:`, roomConfig);
     }
 
     const room = rooms.get(newRoomId);
-
-    // SFU: Support multiple participants (removed 1v1 limit)
-    // Room can now have unlimited participants
-
-    // 房间有用户加入，取消空闲销毁定时器
-    cancelRoomCleanup(newRoomId);
-
     room.peers.add(finalPeerId);
     peers.set(finalPeerId, { ws, roomId: newRoomId });
 
     // 获取房间内其他 peer 列表
     const existingPeers = Array.from(room.peers).filter(id => id !== finalPeerId);
 
-    // 回复加入成功（携带房间编解码配置）
+    // 回复加入成功
     ws.send(JSON.stringify({
         type: 'joined',
         peerId: finalPeerId,
@@ -314,7 +378,7 @@ function handleJoin(ws, msg, oldPeerId, oldRoomId) {
         peerId: finalPeerId
     }, finalPeerId);
 
-    console.log(`[JOIN] Peer "${finalPeerId}" joined room "${newRoomId}" (${room.peers.size}/${MAX_ROOMS} rooms)`);
+    console.log(`[JOIN] Peer "${finalPeerId}" joined room "${newRoomId}" (${room.peers.size} peers)`);
 
     return { peerId: finalPeerId, roomId: newRoomId };
 }
@@ -323,7 +387,6 @@ function ensureUniquePeerId(roomId, baseId) {
     const room = rooms.get(roomId);
     if (!room || !room.peers.has(baseId)) return baseId;
 
-    // 如果 ID 冲突，追加数字后缀
     let counter = 1;
     while (room.peers.has(`${baseId}_${counter}`)) {
         counter++;
@@ -341,18 +404,12 @@ function handleLeave(ws, peerId, roomId) {
     if (room) {
         room.peers.delete(peerId);
 
-        // 通知房间内其他人
         broadcastToRoom(roomId, {
             type: 'peer_left',
             peerId
         }, peerId);
 
         console.log(`[LEAVE] Peer "${peerId}" left room "${roomId}" (${room.peers.size} peers remain)`);
-
-        // 如果房间空了，设置空闲超时自动销毁
-        if (room.peers.size === 0) {
-            scheduleRoomCleanup(roomId);
-        }
     }
 
     peers.delete(peerId);
@@ -367,24 +424,17 @@ function handleBinaryMessage(ws, peerId, roomId, data) {
         return;
     }
 
-    // SFU 数据包格式：
-    // [0-1] 发送者ID长度 (Uint16)
-    // [2..] 发送者ID字节 (UTF-8)
-    // [...] 原始音频包: [采样率2B][序号2B][时间戳4B][Opus数据]
-
     const senderId = peerId;
     const senderIdBytes = new TextEncoder().encode(senderId);
     const senderIdLength = senderIdBytes.length;
 
-    // 创建扩展包: [发送者ID长度2B][发送者ID字节][原始音频数据]
     const extendedPacket = new Uint8Array(2 + senderIdLength + data.length);
     const view = new DataView(extendedPacket.buffer);
 
-    view.setUint16(0, senderIdLength, true); // 发送者ID长度
-    extendedPacket.set(senderIdBytes, 2); // 发送者ID字节
-    extendedPacket.set(data, 2 + senderIdLength); // 原始音频数据
+    view.setUint16(0, senderIdLength, true);
+    extendedPacket.set(senderIdBytes, 2);
+    extendedPacket.set(data, 2 + senderIdLength);
 
-    // 广播给房间内所有其他 peer
     broadcastBinaryToRoom(roomId, extendedPacket, peerId);
 }
 
@@ -429,9 +479,6 @@ setInterval(() => {
             if (room) {
                 room.peers.delete(pid);
                 broadcastToRoom(peer.roomId, { type: 'peer_left', peerId: pid }, pid);
-                if (room.peers.size === 0) {
-                    scheduleRoomCleanup(peer.roomId);
-                }
             }
             peers.delete(pid);
             console.log(`[CLEANUP] Removed stale peer "${pid}"`);
@@ -445,11 +492,11 @@ setInterval(() => {
 server.listen(PORT, () => {
     console.log('═══════════════════════════════════════════');
     console.log('  WebSocket + WebCodecs Voice Relay (SFU)');
-    console.log(`  Server: http://localhost:${PORT}`);
+    console.log(`  Voice:  http://localhost:${PORT}`);
+    console.log(`  Admin:  http://localhost:${PORT}/admin`);
     console.log(`  WS:     ws://localhost:${PORT}`);
-    console.log(`  Max Rooms: ${MAX_ROOMS}`);
-    console.log(`  Room Idle Timeout: ${ENV.ROOM_IDLE_TIMEOUT}s`);
     console.log(`  Default Codec: Opus ${DEFAULT_CODEC_CONFIG.opusBitrate/1000}kbps @ ${DEFAULT_CODEC_CONFIG.sampleRate/1000}kHz`);
+    console.log(`  Service: ${serviceOn ? 'ON' : 'OFF'}`);
     console.log('═══════════════════════════════════════════');
     console.log('[READY] Multi-room SFU WebCodecs Opus relay running');
 });
