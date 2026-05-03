@@ -545,17 +545,43 @@ const VOICE_APP = (() => {
             output: (audioData) => {
                 // 解码完成 → 升采样到48kHz → 发送 PCM 到 Worklet 播放
                 if (workletNode) {
-                    const pcmDataLow = new Float32Array(audioData.numberOfFrames);
-                    audioData.copyTo(pcmDataLow, { planeIndex: 0 });
+                    // 获取解码器实际输出的采样率（Opus 内部可能输出48kHz而非配置的8kHz）
+                    const decodedSampleRate = audioData.sampleRate;
+                    const decodedFrames = audioData.numberOfFrames;
+                    const decodedDurationMs = (decodedFrames / decodedSampleRate) * 1000;
 
-                    // 升采样: 编解码采样率 → 48kHz
-                    const pcmData48k = upsample(pcmDataLow, codecConfig.sampleRate, CONFIG.captureSampleRate);
+                    console.log(`[Decode:${peerId}] decoded: ${decodedFrames}frames@${decodedSampleRate}Hz (${decodedDurationMs.toFixed(1)}ms), config: ${codecConfig.sampleRate}Hz`);
 
-                    console.log(`[Decode:${peerId}] frames=${audioData.numberOfFrames}@${codecConfig.sampleRate}Hz → ${pcmData48k.length}@48kHz`);
+                    // 正确提取 PCM 数据
+                    const copyOptions = {
+                        planeIndex: 0,
+                        frameOffset: 0,
+                        frameCount: decodedFrames
+                    };
+                    const bufferSize = audioData.allocationSize(copyOptions);
+                    const pcmDecoded = new Float32Array(bufferSize / Float32Array.BYTES_PER_ELEMENT);
+                    audioData.copyTo(pcmDecoded, copyOptions);
+
+                    let pcmForPlayback;
+
+                    if (decodedSampleRate === CONFIG.captureSampleRate) {
+                        // 解码器已输出48kHz → 直接使用，无需升采样
+                        pcmForPlayback = pcmDecoded;
+                        console.log(`[Decode:${peerId}] already ${decodedSampleRate}Hz, using directly: ${pcmForPlayback.length}samples`);
+                    } else if (decodedSampleRate < CONFIG.captureSampleRate) {
+                        // 解码器输出低于48kHz（如8kHz）→ 需要升采样
+                        pcmForPlayback = upsample(pcmDecoded, decodedSampleRate, CONFIG.captureSampleRate);
+                        console.log(`[Decode:${peerId}] upsample ${decodedSampleRate}→${CONFIG.captureSampleRate}Hz: ${pcmDecoded.length}→${pcmForPlayback.length}samples`);
+                    } else {
+                        // 解码器输出高于48kHz → 需要降采样
+                        pcmForPlayback = downsample(pcmDecoded, decodedSampleRate, CONFIG.captureSampleRate);
+                        console.log(`[Decode:${peerId}] downsample ${decodedSampleRate}→${CONFIG.captureSampleRate}Hz: ${pcmDecoded.length}→${pcmForPlayback.length}samples`);
+                    }
+
                     workletNode.port.postMessage({
                         type: 'pcm',
                         peerId: peerId,
-                        data: pcmData48k
+                        data: pcmForPlayback
                     });
                     // 说话人指示器：解码到音频数据说明此 peer 正在说话
                     updateSpeakerActivity(peerId);

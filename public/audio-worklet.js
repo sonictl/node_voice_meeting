@@ -15,8 +15,9 @@ class VoiceWorklet extends AudioWorkletProcessor {
         this._captureBuffer = [];
 
         // ---- SFU 播放端参数 ----
-        this._peerBuffers = new Map(); // peerId -> {buffer: Float32Array, write: number, read: number}
+        this._peerBuffers = new Map(); // peerId -> {buffer: Float32Array, write: number, read: number, isReady: boolean}
         this._jitterBufferFrames = 8;  // 默认8帧，由主线程 config 消息更新
+        this._preBufferFrames = 2;     // 预缓冲帧数：等待2帧数据后再开始播放
 
         // ---- 状态 ----
         this._frameSeq = 0;
@@ -101,7 +102,8 @@ class VoiceWorklet extends AudioWorkletProcessor {
                 peerBuffer = {
                     buffer: new Float32Array(this._frameSamples * 8), // 8帧缓冲 (~480ms)
                     write: 0,
-                    read: 0
+                    read: 0,
+                    isReady: false  // 标记是否已预缓冲完成
                 };
                 this._peerBuffers.set(data.peerId, peerBuffer);
                 console.log(`[VoiceWorklet] Created buffer for peer: ${data.peerId}`);
@@ -111,6 +113,16 @@ class VoiceWorklet extends AudioWorkletProcessor {
             for (let i = 0; i < pcm.length; i++) {
                 peerBuffer.buffer[peerBuffer.write] = pcm[i];
                 peerBuffer.write = (peerBuffer.write + 1) % peerBuffer.buffer.length;
+            }
+
+            // 检查是否已预缓冲足够数据（2帧 = ~120ms）
+            if (!peerBuffer.isReady) {
+                const buffered = this._getPeerBufferedSamples(data.peerId);
+                const preBufferSamples = this._frameSamples * this._preBufferFrames;
+                if (buffered >= preBufferSamples) {
+                    peerBuffer.isReady = true;
+                    console.log(`[VoiceWorklet] Peer ${data.peerId} ready: buffered ${buffered} samples (${(buffered/this._sampleRate*1000).toFixed(0)}ms)`);
+                }
             }
         }
 
@@ -205,6 +217,9 @@ class VoiceWorklet extends AudioWorkletProcessor {
             // 从每个peer缓冲区读取并混合
             let activePeers = 0;
             for (const [peerId, peerBuffer] of this._peerBuffers) {
+                // 只有预缓冲完成的peer才参与播放
+                if (!peerBuffer.isReady) continue;
+
                 const available = this._getPeerBufferedSamples(peerId);
                 if (available >= needed) {
                     const peerAudio = this._readFromPeerBuffer(peerId, needed);
@@ -213,6 +228,10 @@ class VoiceWorklet extends AudioWorkletProcessor {
                         outputChannel[i] += peerAudio[i];
                     }
                     activePeers++;
+                } else {
+                    // 缓冲区欠载：重置为未就绪状态，等待重新预缓冲
+                    peerBuffer.isReady = false;
+                    console.log(`[VoiceWorklet] Peer ${peerId} underrun, reset to buffering`);
                 }
             }
 
