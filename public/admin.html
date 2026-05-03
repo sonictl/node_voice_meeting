@@ -336,7 +336,7 @@
                     <button class="preset-btn" data-preset="high-quality">🎵 高清</button>
                     <button class="preset-btn" data-preset="low-latency">🚀 低延迟</button>
                 </div>
-                <button class="btn-apply-config" onclick="applyCodecConfig()">💾 应用配置到新房间</button>
+                <button class="btn-apply-config" onclick="applyCodecConfig()">💾 应用配置到新会议</button>
                 <div id="configMsg" class="success-msg hidden"></div>
             </div>
 
@@ -535,7 +535,7 @@
                 const data = await res.json();
                 const msgEl = document.getElementById('configMsg');
                 if (data.ok) {
-                    msgEl.textContent = '✅ 配置已更新，新房间将使用此配置';
+                    msgEl.textContent = '✅ 配置已更新，新会议将使用此配置';
                     msgEl.className = 'success-msg';
                 } else {
                     msgEl.textContent = '❌ ' + (data.message || '配置失败');
