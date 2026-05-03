@@ -608,7 +608,7 @@ const VOICE_APP = (() => {
             setStatus('🔄 连接信令服务器...', '#888');
             await connectWebSocket();
 
-            setStatus('🔄 加入多人会议房间...', '#888');
+            setStatus('🔄 加入多人会议...', '#888');
 
             // 发送 join 请求（不携带编解码参数，由服务器决定）
             ws.send(JSON.stringify({
