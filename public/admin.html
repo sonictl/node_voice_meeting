@@ -20,7 +20,7 @@
             padding: 28px;
             border-radius: 12px;
             box-shadow: 0 4px 20px rgba(0,0,0,0.4);
-            width: 450px;
+            width: 520px;
             max-width: 95vw;
         }
         h1 {
@@ -34,6 +34,13 @@
         }
         .badge {
             background: #d16969;
+            padding: 3px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: normal;
+        }
+        .badge-config {
+            background: #4caf50;
             padding: 3px 10px;
             border-radius: 6px;
             font-size: 11px;
@@ -158,6 +165,91 @@
         .login-section, .dashboard-section {
             transition: opacity 0.3s;
         }
+
+        /* 编解码配置面板样式 */
+        .config-section {
+            background: #1e1e1e;
+            border-radius: 6px;
+            padding: 14px;
+            margin: 12px 0;
+        }
+        .config-section h3 {
+            font-size: 14px;
+            color: #4caf50;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .config-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        .config-item {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .config-item label {
+            font-size: 11px;
+            color: #888;
+            margin-bottom: 0;
+        }
+        .config-item select {
+            background: #3d3d3d;
+            color: #d4d4d4;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 6px 8px;
+            font-size: 12px;
+            font-family: monospace;
+        }
+        .config-item select:focus {
+            outline: none;
+            border-color: #0e639c;
+        }
+        .config-presets {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 10px;
+            align-items: center;
+        }
+        .preset-label {
+            font-size: 11px;
+            color: #888;
+        }
+        .preset-btn {
+            flex: none;
+            padding: 5px 10px;
+            font-size: 11px;
+            border-radius: 4px;
+            background: #3d3d3d;
+            color: #d4d4d4;
+            border: 1px solid #555;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .preset-btn:hover {
+            background: #4d4d4d;
+            border-color: #0e639c;
+        }
+        .preset-btn.active {
+            background: #0e639c;
+            border-color: #0e639c;
+            color: white;
+        }
+        .btn-apply-config {
+            background: #4caf50;
+            padding: 8px 16px;
+            font-size: 13px;
+            margin-top: 10px;
+            width: 100%;
+        }
+        .btn-apply-config:hover {
+            background: #5cbf60;
+        }
     </style>
 </head>
 <body>
@@ -196,6 +288,58 @@
                 <span class="info-value" id="infoPeers">—</span>
             </div>
 
+            <!-- 编解码配置面板（管理员可配置） -->
+            <div class="config-section">
+                <h3>⚙️ 编解码配置 <span class="badge-config">管理员</span></h3>
+                <div class="config-grid">
+                    <div class="config-item">
+                        <label>编解码采样率</label>
+                        <select id="configSampleRate">
+                            <option value="8000" selected>8 kHz（弱网）</option>
+                            <option value="16000">16 kHz</option>
+                            <option value="24000">24 kHz</option>
+                            <option value="48000">48 kHz</option>
+                        </select>
+                    </div>
+                    <div class="config-item">
+                        <label>Opus 比特率</label>
+                        <select id="configBitrate">
+                            <option value="8000">8 kbps</option>
+                            <option value="16000" selected>16 kbps（弱网）</option>
+                            <option value="32000">32 kbps</option>
+                            <option value="64000">64 kbps</option>
+                        </select>
+                    </div>
+                    <div class="config-item">
+                        <label>帧长</label>
+                        <select id="configFrameDuration">
+                            <option value="0.02">20 ms</option>
+                            <option value="0.04">40 ms</option>
+                            <option value="0.06" selected>60 ms（弱网）</option>
+                            <option value="0.12">120 ms</option>
+                        </select>
+                    </div>
+                    <div class="config-item">
+                        <label>抖动缓冲</label>
+                        <select id="configJitter">
+                            <option value="2">2 帧</option>
+                            <option value="4">4 帧</option>
+                            <option value="6">6 帧</option>
+                            <option value="8" selected>8 帧（弱网）</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="config-presets">
+                    <span class="preset-label">预设模式：</span>
+                    <button class="preset-btn active" data-preset="weak-network">📡 弱网（默认）</button>
+                    <button class="preset-btn" data-preset="balanced">⚖️ 均衡</button>
+                    <button class="preset-btn" data-preset="high-quality">🎵 高清</button>
+                    <button class="preset-btn" data-preset="low-latency">🚀 低延迟</button>
+                </div>
+                <button class="btn-apply-config" onclick="applyCodecConfig()">💾 应用配置到新房间</button>
+                <div id="configMsg" class="success-msg hidden"></div>
+            </div>
+
             <div class="btn-group">
                 <button id="stopBtn" class="btn-stop" onclick="stopService()">⏹️ 关闭服务</button>
                 <button id="startBtn" class="btn-start hidden" onclick="startService()">▶️ 开启服务</button>
@@ -205,13 +349,21 @@
         </div>
 
         <div class="footer">
-            WebSocket + WebCodecs 多人语音会议系统
+            WebSocket + WebCodecs 多人语音会议系统 · 弱网优化
         </div>
     </div>
 
     <script>
         let isAuthenticated = false;
         let statusInterval = null;
+
+        // 编解码配置预设
+        const PRESETS = {
+            'weak-network': { sampleRate: 8000, bitrate: 16000, frameDuration: 0.06, jitter: 8 },
+            'balanced':     { sampleRate: 16000, bitrate: 32000, frameDuration: 0.04, jitter: 4 },
+            'high-quality': { sampleRate: 48000, bitrate: 64000, frameDuration: 0.04, jitter: 2 },
+            'low-latency':  { sampleRate: 48000, bitrate: 64000, frameDuration: 0.02, jitter: 2 }
+        };
 
         async function login() {
             const password = document.getElementById('passwordInput').value;
@@ -231,7 +383,9 @@
                     document.getElementById('dashboardSection').classList.remove('hidden');
                     errorEl.classList.add('hidden');
                     loadStatus();
+                    loadCodecConfig(); // 加载服务器当前编解码配置
                     statusInterval = setInterval(loadStatus, 3000);
+                    initPresetButtons();
                 } else {
                     errorEl.textContent = '❌ 密码错误';
                     errorEl.classList.remove('hidden');
@@ -300,6 +454,102 @@
             el.textContent = msg;
             el.classList.remove('hidden');
             setTimeout(() => el.classList.add('hidden'), 3000);
+        }
+
+        // ---- 编解码配置管理 ----
+
+        /**
+         * 从服务器获取当前编解码配置并显示在面板上
+         */
+        async function loadCodecConfig() {
+            try {
+                const res = await fetch('/admin/api/codec-config');
+                const config = await res.json();
+                
+                if (config.sampleRate) {
+                    document.getElementById('configSampleRate').value = config.sampleRate;
+                }
+                if (config.opusBitrate) {
+                    document.getElementById('configBitrate').value = config.opusBitrate;
+                }
+                if (config.frameDuration) {
+                    document.getElementById('configFrameDuration').value = config.frameDuration;
+                }
+                if (config.jitterBufferFrames) {
+                    document.getElementById('configJitter').value = config.jitterBufferFrames;
+                }
+
+                // 匹配对应的预设模式并高亮
+                for (const [name, preset] of Object.entries(PRESETS)) {
+                    if (preset.sampleRate === config.sampleRate &&
+                        preset.bitrate === config.opusBitrate &&
+                        preset.frameDuration === config.frameDuration &&
+                        preset.jitter === config.jitterBufferFrames) {
+                        document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+                        document.querySelector(`.preset-btn[data-preset="${name}"]`)?.classList.add('active');
+                        break;
+                    }
+                }
+
+                console.log('[Admin] Loaded server config:', config);
+            } catch (err) {
+                console.error('[Admin] Failed to load codec config:', err);
+            }
+        }
+
+        function initPresetButtons() {
+            document.querySelectorAll('.preset-btn').forEach(btn => {
+                btn.addEventListener('click', () => applyPreset(btn.dataset.preset));
+            });
+        }
+
+        function applyPreset(name) {
+            const preset = PRESETS[name];
+            if (!preset) return;
+
+            document.getElementById('configSampleRate').value = preset.sampleRate;
+            document.getElementById('configBitrate').value = preset.bitrate;
+            document.getElementById('configFrameDuration').value = preset.frameDuration;
+            document.getElementById('configJitter').value = preset.jitter;
+
+            document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+            document.querySelector(`.preset-btn[data-preset="${name}"]`)?.classList.add('active');
+
+            console.log('[Admin] Applied preset:', name, preset);
+        }
+
+        async function applyCodecConfig() {
+            const config = {
+                sampleRate: parseInt(document.getElementById('configSampleRate').value),
+                opusBitrate: parseInt(document.getElementById('configBitrate').value),
+                frameDuration: parseFloat(document.getElementById('configFrameDuration').value),
+                jitterBufferFrames: parseInt(document.getElementById('configJitter').value)
+            };
+
+            try {
+                const res = await fetch('/admin/api/codec-config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                const data = await res.json();
+                const msgEl = document.getElementById('configMsg');
+                if (data.ok) {
+                    msgEl.textContent = '✅ 配置已更新，新房间将使用此配置';
+                    msgEl.className = 'success-msg';
+                } else {
+                    msgEl.textContent = '❌ ' + (data.message || '配置失败');
+                    msgEl.className = 'error-msg';
+                }
+                msgEl.classList.remove('hidden');
+                setTimeout(() => msgEl.classList.add('hidden'), 3000);
+            } catch (err) {
+                const msgEl = document.getElementById('configMsg');
+                msgEl.textContent = '❌ 配置失败: ' + err.message;
+                msgEl.className = 'error-msg';
+                msgEl.classList.remove('hidden');
+                setTimeout(() => msgEl.classList.add('hidden'), 3000);
+            }
         }
     </script>
 </body>

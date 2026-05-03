@@ -1,24 +1,77 @@
 // =============================================
 // WebSocket + WebCodecs 语音客户端
 // 浏览器原生编解码 · 零依赖 · 超低延迟
+// 架构: 48kHz采集 → 降采样8kHz → Opus编码 → WS → 服务器中继 → WS → Opus解码8kHz → 升采样48kHz → 播放
+// 编解码参数从服务器获取（管理员可在后台配置）
 // =============================================
 
 const VOICE_APP = (() => {
     'use strict';
 
     // =============================================
-    // 配置
+    // 基础配置（客户端固定，不可通过服务器修改）
     // =============================================
-    // 从 URL 路径获取房间 ID（由服务端注入到 window.__ROOM_ID__）
-    const ROOM_ID = window.__ROOM_ID__ || 'default';
     const CONFIG = {
         serverUrl: `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`,
-        roomId: ROOM_ID,
-        sampleRate: 48000,       // 48kHz 足够语音
-        frameDuration: 0.04,     // 40ms 帧长
-        opusBitrate: 32000,      // 32kbps 语音最优
-        jitterBufferFrames: 4    // 4 帧抖动缓冲 (~160ms)
+        roomId: window.__ROOM_ID__ || 'default',
+        captureSampleRate: 48000    // 浏览器硬件采集采样率（固定48kHz，不可变）
     };
+
+    // ---- 编解码参数（从服务器获取，动态更新） ----
+    let codecConfig = {
+        sampleRate: 8000,           // 默认8kHz，加入房间后由服务器下发覆盖
+        frameDuration: 0.06,        // 默认60ms
+        opusBitrate: 16000,         // 默认16kbps
+        jitterBufferFrames: 8       // 默认8帧
+    };
+
+    // =============================================
+    // 重采样函数（线性插值）
+    // =============================================
+
+    /**
+     * 降采样：从高采样率到低采样率
+     * @param {Float32Array} input - 输入 PCM 数据
+     * @param {number} fromRate - 输入采样率
+     * @param {number} toRate - 输出采样率
+     * @returns {Float32Array} 降采样后的 PCM 数据
+     */
+    function downsample(input, fromRate, toRate) {
+        if (fromRate === toRate) return input;
+        const ratio = fromRate / toRate;
+        const outputLength = Math.floor(input.length / ratio);
+        const output = new Float32Array(outputLength);
+        for (let i = 0; i < outputLength; i++) {
+            const srcIdx = i * ratio;
+            const idx0 = Math.floor(srcIdx);
+            const idx1 = Math.min(idx0 + 1, input.length - 1);
+            const frac = srcIdx - idx0;
+            output[i] = input[idx0] * (1 - frac) + input[idx1] * frac;
+        }
+        return output;
+    }
+
+    /**
+     * 升采样：从低采样率到高采样率
+     * @param {Float32Array} input - 输入 PCM 数据
+     * @param {number} fromRate - 输入采样率
+     * @param {number} toRate - 输出采样率
+     * @returns {Float32Array} 升采样后的 PCM 数据
+     */
+    function upsample(input, fromRate, toRate) {
+        if (fromRate === toRate) return input;
+        const ratio = toRate / fromRate;
+        const outputLength = Math.round(input.length * ratio);
+        const output = new Float32Array(outputLength);
+        for (let i = 0; i < outputLength; i++) {
+            const srcIdx = i / ratio;
+            const idx0 = Math.floor(srcIdx);
+            const idx1 = Math.min(idx0 + 1, input.length - 1);
+            const frac = srcIdx - idx0;
+            output[i] = input[idx0] * (1 - frac) + input[idx1] * frac;
+        }
+        return output;
+    }
 
     // =============================================
     // 状态
@@ -54,8 +107,6 @@ const VOICE_APP = (() => {
 
     // UI 元素
     let statusEl, peersListEl, debugInfoEl, myPeerIdEl, roomStatusEl, roomIdDisplayEl;
-    let configSectionEl, roomConfigInfoEl, roomConfigDetailsEl;
-    let configSampleRateEl, configBitrateEl, configFrameDurationEl, configJitterEl;
     let muteBtnEl;
 
     // =============================================
@@ -100,8 +151,8 @@ const VOICE_APP = (() => {
             ws.onclose = () => {
                 console.log('[WS] Disconnected');
                 if (isJoined) {
-                    setStatus('🔴 连接断开，3秒后重连...', '#d16969');
-                    setTimeout(() => reconnect(), 3000);
+                    setStatus('🔴 连接断开，5秒后重连...', '#d16969');
+                    setTimeout(() => reconnect(), 5000);
                 } else {
                     setStatus('🔴 断开连接', '#d16969');
                 }
@@ -136,14 +187,9 @@ const VOICE_APP = (() => {
                 isJoined = true;
                 setStatus(`🎙️ 已加入多人通话房间 (${msg.roomId})`, '#4caf50');
 
-                // 应用服务端下发的编解码配置
+                // 从服务器获取编解码配置
                 if (msg.codecConfig) {
-                    applyRoomConfig(msg.codecConfig);
-                }
-
-                // 如果房间已有其他成员，说明配置已由先加入者决定，隐藏配置面板
-                if (msg.peers && msg.peers.length > 0 && configSectionEl) {
-                    configSectionEl.style.display = 'none';
+                    applyServerConfig(msg.codecConfig);
                 }
 
                 if (msg.peers && msg.peers.length > 0) {
@@ -171,7 +217,6 @@ const VOICE_APP = (() => {
             case 'error':
                 console.error('[Server]', msg.message);
                 setStatus(`⚠️ ${msg.message}`, '#ffa500');
-                // 如果是房间已满错误，恢复按钮状态
                 if (msg.message.includes('通话房间已满')) {
                     document.getElementById('joinBtn').disabled = false;
                     document.getElementById('joinBtn').textContent = '📞 加入通话';
@@ -180,6 +225,49 @@ const VOICE_APP = (() => {
                 }
                 break;
         }
+    }
+
+    // =============================================
+    // 应用服务器下发的编解码配置
+    // =============================================
+    function applyServerConfig(serverConfig) {
+        if (!serverConfig) return;
+
+        if (serverConfig.sampleRate) codecConfig.sampleRate = serverConfig.sampleRate;
+        if (serverConfig.opusBitrate) codecConfig.opusBitrate = serverConfig.opusBitrate;
+        if (serverConfig.frameDuration) codecConfig.frameDuration = serverConfig.frameDuration;
+        if (serverConfig.jitterBufferFrames) codecConfig.jitterBufferFrames = serverConfig.jitterBufferFrames;
+
+        console.log('[Config] Applied server config:', codecConfig);
+
+        // 更新 UI 上的参数显示
+        updateCodecParamsDisplay();
+    }
+
+    /**
+     * 更新页面上的编解码参数显示
+     */
+    function updateCodecParamsDisplay() {
+        const paramItems = document.querySelectorAll('.param-item');
+        if (!paramItems.length) return;
+
+        // 按顺序更新: 采集采样率、编解码采样率、比特率、帧长、抖动缓冲、重采样、RMS阈值
+        const values = [
+            `${CONFIG.captureSampleRate / 1000} kHz`,
+            `${codecConfig.sampleRate / 1000} kHz`,
+            `${codecConfig.opusBitrate / 1000} kbps`,
+            `${(codecConfig.frameDuration * 1000).toFixed(0)} ms`,
+            `${codecConfig.jitterBufferFrames} 帧 (~${(codecConfig.jitterBufferFrames * codecConfig.frameDuration * 1000).toFixed(0)}ms)`,
+            `${CONFIG.captureSampleRate / 1000}kHz ↔ ${codecConfig.sampleRate / 1000}kHz 线性插值`,
+            '0.015'
+        ];
+
+        paramItems.forEach((item, index) => {
+            if (index < values.length) {
+                const valueEl = item.querySelector('.param-value');
+                if (valueEl) valueEl.textContent = values[index];
+            }
+        });
     }
 
     // =============================================
@@ -195,7 +283,7 @@ const VOICE_APP = (() => {
         const view = new DataView(packet);
         const seq = seqCounter++;
 
-        view.setUint16(0, CONFIG.sampleRate, true);
+        view.setUint16(0, codecConfig.sampleRate, true); // 使用服务器下发的编解码采样率
         view.setUint16(2, seq, true);
         view.setUint32(4, Date.now(), true);
 
@@ -211,7 +299,7 @@ const VOICE_APP = (() => {
     // 说话人指示器状态
     // =============================================
     let speakerActivity = new Map(); // peerId -> { lastActiveTime, energy }
-    const SPEAKER_TIMEOUT_MS = 800; // 超过此时间无音频则视为停止说话
+    const SPEAKER_TIMEOUT_MS = 300; // 300ms 保持定时器避免闪烁
 
     /**
      * 更新说话人指示器
@@ -292,7 +380,6 @@ const VOICE_APP = (() => {
     // =============================================
     function updatePeerInfoSection() {
         // 成员列表由 addPeerToList / removePeerFromList 维护
-        // 此函数仅用于触发 UI 更新
     }
 
     // =============================================
@@ -302,12 +389,12 @@ const VOICE_APP = (() => {
         if (audioCtx) return;
 
         audioCtx = new AudioContext({
-            sampleRate: CONFIG.sampleRate,
+            sampleRate: CONFIG.captureSampleRate, // 固定48kHz
             latencyHint: 'interactive'
         });
 
         // 加载 AudioWorklet
-        await audioCtx.audioWorklet.addModule('/audio-worklet.js?v=1');
+        await audioCtx.audioWorklet.addModule('/audio-worklet.js?v=2');
 
         // 创建 Worklet 节点
         workletNode = new AudioWorkletNode(audioCtx, 'voice-worklet');
@@ -317,22 +404,24 @@ const VOICE_APP = (() => {
             const data = event.data;
 
             if (data.type === 'pcm') {
+                // 收到麦克风 PCM（48kHz）→ 降采样 → 编码 → 发送
+                if (!encoder || encoder.state !== 'configured') return;
+
                 // VAD: 如果检测到静音且没有挂起，跳过编码和发送
                 if (data.hasVoice === false) {
-                    // 静音帧：不编码、不发送，节省带宽
-                    return;
+                    return; // 静音帧：不编码、不发送，节省带宽
                 }
 
-                // 收到麦克风 PCM → 编码 → 发送
-                if (!encoder || encoder.state !== 'configured') return;
+                // 降采样: 48kHz → 服务器下发的编解码采样率
+                const downsampled = downsample(data.data, CONFIG.captureSampleRate, codecConfig.sampleRate);
 
                 const audioData = new AudioData({
                     format: 'f32-planar',
-                    sampleRate: CONFIG.sampleRate,
-                    numberOfFrames: data.data.length,
+                    sampleRate: codecConfig.sampleRate,
+                    numberOfFrames: downsampled.length,
                     numberOfChannels: 1,
                     timestamp: performance.now() * 1000,
-                    data: data.data
+                    data: downsampled
                 });
 
                 encoder.encode(audioData);
@@ -352,7 +441,7 @@ const VOICE_APP = (() => {
         workletNode.connect(gainNode);
         gainNode.connect(audioCtx.destination);
 
-        console.log(`[Audio] Initialized: ${CONFIG.sampleRate}Hz`);
+        console.log(`[Audio] Initialized: ${CONFIG.captureSampleRate}Hz capture, ${codecConfig.sampleRate}Hz codec`);
     }
 
     // =============================================
@@ -366,7 +455,7 @@ const VOICE_APP = (() => {
                     noiseSuppression: true,
                     autoGainControl: true,
                     channelCount: 1,
-                    sampleRate: { ideal: CONFIG.sampleRate }
+                    sampleRate: { ideal: CONFIG.captureSampleRate }
                 }
             });
 
@@ -383,7 +472,7 @@ const VOICE_APP = (() => {
     }
 
     // =============================================
-    // WebCodecs 编解码器初始化
+    // WebCodecs 编解码器初始化（使用服务器下发的参数）
     // =============================================
     async function initCodec() {
         if (!window.AudioEncoder || !window.AudioDecoder) {
@@ -393,24 +482,24 @@ const VOICE_APP = (() => {
         // 检查 Opus 编码支持
         const encSupported = await AudioEncoder.isConfigSupported({
             codec: 'opus',
-            sampleRate: CONFIG.sampleRate,
+            sampleRate: codecConfig.sampleRate,
             numberOfChannels: 1
         });
         if (!encSupported.supported) {
-            throw new Error('浏览器不支持 Opus 编码');
+            throw new Error(`浏览器不支持 Opus 编码 @ ${codecConfig.sampleRate}Hz`);
         }
-        console.log('[Codec] Opus encoding supported');
+        console.log(`[Codec] Opus encoding supported @ ${codecConfig.sampleRate}Hz`);
 
         // 检查 Opus 解码支持
         const decSupported = await AudioDecoder.isConfigSupported({
             codec: 'opus',
-            sampleRate: CONFIG.sampleRate,
+            sampleRate: codecConfig.sampleRate,
             numberOfChannels: 1
         });
         if (!decSupported.supported) {
-            throw new Error('浏览器不支持 Opus 解码');
+            throw new Error(`浏览器不支持 Opus 解码 @ ${codecConfig.sampleRate}Hz`);
         }
-        console.log('[Codec] Opus decoding supported');
+        console.log(`[Codec] Opus decoding supported @ ${codecConfig.sampleRate}Hz`);
 
         // ---- 编码器 ----
         encoder = new AudioEncoder({
@@ -428,12 +517,12 @@ const VOICE_APP = (() => {
 
         encoder.configure({
             codec: 'opus',
-            sampleRate: CONFIG.sampleRate,
+            sampleRate: codecConfig.sampleRate,
             numberOfChannels: 1,
-            bitrate: CONFIG.opusBitrate
+            bitrate: codecConfig.opusBitrate
         });
 
-        console.log(`[Encoder] state=${encoder.state}`);
+        console.log(`[Encoder] state=${encoder.state}, config: ${codecConfig.sampleRate}Hz, ${codecConfig.opusBitrate}bps`);
 
         // ---- 解码器 ----
         // SFU: Decoders created per peer, not globally
@@ -446,15 +535,19 @@ const VOICE_APP = (() => {
     function createPeerDecoder(peerId) {
         const decoder = new AudioDecoder({
             output: (audioData) => {
-                // 解码完成 → 发送 PCM 到 Worklet 播放 (带peerId标识)
+                // 解码完成 → 升采样到48kHz → 发送 PCM 到 Worklet 播放
                 if (workletNode) {
-                    const pcmData = new Float32Array(audioData.numberOfFrames);
-                    audioData.copyTo(pcmData, { planeIndex: 0 });
-                    console.log(`[Decode:${peerId}] frames=${audioData.numberOfFrames}, sampleRate=${audioData.sampleRate}`);
+                    const pcmDataLow = new Float32Array(audioData.numberOfFrames);
+                    audioData.copyTo(pcmDataLow, { planeIndex: 0 });
+
+                    // 升采样: 编解码采样率 → 48kHz
+                    const pcmData48k = upsample(pcmDataLow, codecConfig.sampleRate, CONFIG.captureSampleRate);
+
+                    console.log(`[Decode:${peerId}] frames=${audioData.numberOfFrames}@${codecConfig.sampleRate}Hz → ${pcmData48k.length}@48kHz`);
                     workletNode.port.postMessage({
                         type: 'pcm',
                         peerId: peerId,
-                        data: pcmData
+                        data: pcmData48k
                     });
                     // 说话人指示器：解码到音频数据说明此 peer 正在说话
                     updateSpeakerActivity(peerId);
@@ -468,11 +561,11 @@ const VOICE_APP = (() => {
 
         decoder.configure({
             codec: 'opus',
-            sampleRate: CONFIG.sampleRate,
+            sampleRate: codecConfig.sampleRate,
             numberOfChannels: 1
         });
 
-        console.log(`[Decoder:${peerId}] state=${decoder.state}`);
+        console.log(`[Decoder:${peerId}] state=${decoder.state}, config: ${codecConfig.sampleRate}Hz`);
         return decoder;
     }
 
@@ -489,16 +582,14 @@ const VOICE_APP = (() => {
 
             setStatus('🔄 加入多人通话房间...', '#888');
 
-            // 先发送 join 请求，等待服务端返回房间配置
-            const userCodecConfig = getSelectedConfig();
+            // 发送 join 请求（不携带编解码参数，由服务器决定）
             ws.send(JSON.stringify({
                 type: 'join',
                 roomId: CONFIG.roomId,
-                peerId: null,
-                codecConfig: userCodecConfig
+                peerId: null
             }));
 
-            // 等待 joined 消息，获取服务端下发的房间配置
+            // 等待 joined 消息，获取服务器下发的编解码配置
             const roomConfig = await new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => reject(new Error('加入超时')), 10000);
                 const origHandler = ws.onmessage;
@@ -508,11 +599,13 @@ const VOICE_APP = (() => {
                         const msg = JSON.parse(event.data);
                         if (msg.type === 'joined') {
                             clearTimeout(timeout);
-                            // 恢复原始消息处理器
                             ws.onmessage = origHandler;
-                            // 先处理 joined 消息
+                            // 先应用服务器配置，再处理 joined 消息
+                            if (msg.codecConfig) {
+                                applyServerConfig(msg.codecConfig);
+                            }
                             handleSignal(msg);
-                            resolve(msg.codecConfig || userCodecConfig);
+                            resolve(msg.codecConfig);
                         } else if (msg.type === 'error') {
                             clearTimeout(timeout);
                             ws.onmessage = origHandler;
@@ -522,12 +615,7 @@ const VOICE_APP = (() => {
                 };
             });
 
-            // 使用服务端下发的房间配置初始化编解码器
             setStatus('🔄 初始化 WebCodecs 编解码器...', '#888');
-            CONFIG.sampleRate = roomConfig.sampleRate || CONFIG.sampleRate;
-            CONFIG.opusBitrate = roomConfig.opusBitrate || CONFIG.opusBitrate;
-            CONFIG.frameDuration = roomConfig.frameDuration || CONFIG.frameDuration;
-            CONFIG.jitterBufferFrames = roomConfig.jitterBufferFrames || CONFIG.jitterBufferFrames;
             await initCodec();
 
             setStatus('🔄 初始化音频系统...', '#888');
@@ -547,9 +635,6 @@ const VOICE_APP = (() => {
                 muteBtnEl.textContent = '🎤 麦克风开';
                 muteBtnEl.className = 'btn-mute';
             }
-
-            // 锁定配置面板（通话中不可修改）
-            enableConfigUI(false);
 
             startStatsUpdater();
 
@@ -608,23 +693,29 @@ const VOICE_APP = (() => {
             peersListEl2.innerHTML = '<span style="color:#666; font-size:13px;">暂无其他成员</span>';
         }
 
-        // 隐藏房间配置信息
-        if (roomConfigInfoEl) roomConfigInfoEl.style.display = 'none';
-        // 恢复配置面板显示（下次加入时可重新选择）
-        if (configSectionEl) configSectionEl.style.display = 'block';
         // 隐藏麦克风控制按钮
         if (muteBtnEl) muteBtnEl.style.display = 'none';
         isMuted = false;
     }
 
     // =============================================
-    // 断线重连
+    // 断线重连（5秒）
     // =============================================
     async function reconnect() {
         if (isInitializing) return;
         try {
             isJoined = false;
             ws = null;
+
+            // 清理旧状态：关闭所有解码器，清空 peer 列表
+            for (const [pid, decoder] of peerDecoders) {
+                if (decoder.state !== 'closed') decoder.close();
+            }
+            peerDecoders.clear();
+            roomPeers.clear();
+            speakerActivity.clear();
+            stats.lastSeqReceived.clear();
+
             await connectWebSocket();
             ws.send(JSON.stringify({
                 type: 'join',
@@ -691,9 +782,6 @@ const VOICE_APP = (() => {
         roomPeers.clear();
         updateRoomStatus();
         updatePeerInfoSection();
-
-        // 恢复配置面板可编辑状态
-        enableConfigUI(true);
     }
 
     // =============================================
@@ -703,8 +791,6 @@ const VOICE_APP = (() => {
         // SFU 数据包格式: [发送者ID长度2B][发送者ID字节][采样率2B][序号2B][时间戳4B][Opus数据]
         if (data.length <= 10) return; // 没有音频数据
 
-        // 修复: 使用 data.buffer 构造 DataView 时，必须考虑 byteOffset
-        // 但更安全的方式是直接操作 Uint8Array 并手动解析
         let offset = 0;
         const senderIdLength = (data[offset] | (data[offset + 1] << 8));
         offset += 2;
@@ -715,7 +801,7 @@ const VOICE_APP = (() => {
         const audioData = data.subarray(offset);
         if (audioData.length <= 8) return;
 
-        // 修复: 从 audioData 复制到新 Uint8Array 以确保 DataView 对齐
+        // 解析头部
         const alignedBuf = new Uint8Array(8);
         alignedBuf[0] = audioData[0];
         alignedBuf[1] = audioData[1];
@@ -748,7 +834,7 @@ const VOICE_APP = (() => {
         const chunk = new EncodedAudioChunk({
             type: 'key',
             timestamp: timestamp * 1000,
-            duration: CONFIG.frameDuration * 1_000_000,
+            duration: codecConfig.frameDuration * 1_000_000,
             data: opusData
         });
 
@@ -803,7 +889,7 @@ const VOICE_APP = (() => {
         panel.style.display = 'block';
 
         const bitrateSend = stats.packetsSent > 0
-            ? ((stats.bytesSent * 8) / (stats.packetsSent * CONFIG.frameDuration) / 1000).toFixed(1)
+            ? ((stats.bytesSent * 8) / (stats.packetsSent * codecConfig.frameDuration) / 1000).toFixed(1)
             : '0';
 
         info.innerHTML = `
@@ -811,93 +897,9 @@ const VOICE_APP = (() => {
             <span>👥 房间: ${roomPeers.size + (myPeerId ? 1 : 0)} 人</span><br>
             <span>📤 发送: ${stats.packetsSent} 包 | ${bitrateSend}kbps</span><br>
             <span>📥 接收: ${stats.packetsRecv} 包</span><br>
-            <span>📊 编码: Opus ${CONFIG.opusBitrate/1000}kbps | ${CONFIG.frameDuration * 1000}ms/帧 | ${CONFIG.sampleRate/1000}kHz</span>
+            <span>📊 编码: Opus ${codecConfig.opusBitrate/1000}kbps | ${codecConfig.frameDuration * 1000}ms/帧 | ${codecConfig.sampleRate/1000}kHz</span><br>
+            <span>📐 重采样: 48kHz↔${codecConfig.sampleRate/1000}kHz 线性插值</span>
         `;
-    }
-
-    // =============================================
-    // 编解码配置预设
-    // =============================================
-    const PRESETS = {
-        'low-latency': { sampleRate: 48000, bitrate: 64000, frameDuration: 0.02, jitter: 2 },
-        'balanced':    { sampleRate: 48000, bitrate: 32000, frameDuration: 0.04, jitter: 4 },
-        'high-quality':{ sampleRate: 48000, bitrate: 64000, frameDuration: 0.04, jitter: 2 },
-        'weak-network':{ sampleRate: 16000, bitrate: 16000, frameDuration: 0.06, jitter: 8 }
-    };
-
-    function applyPreset(name) {
-        const preset = PRESETS[name];
-        if (!preset) return;
-
-        configSampleRateEl.value = preset.sampleRate;
-        configBitrateEl.value = preset.bitrate;
-        configFrameDurationEl.value = preset.frameDuration;
-        configJitterEl.value = preset.jitter;
-
-        // 高亮当前预设按钮
-        document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
-        document.querySelector(`.preset-btn[data-preset="${name}"]`)?.classList.add('active');
-
-        console.log('[Config] Applied preset:', name, preset);
-    }
-
-    // =============================================
-    // 获取当前UI配置
-    // =============================================
-    function getSelectedConfig() {
-        return {
-            sampleRate: parseInt(configSampleRateEl.value),
-            opusBitrate: parseInt(configBitrateEl.value),
-            frameDuration: parseFloat(configFrameDurationEl.value),
-            jitterBufferFrames: parseInt(configJitterEl.value)
-        };
-    }
-
-    // =============================================
-    // 应用服务端下发的房间配置
-    // =============================================
-    function applyRoomConfig(codecConfig) {
-        if (!codecConfig) return;
-
-        // 更新 CONFIG
-        if (codecConfig.sampleRate) CONFIG.sampleRate = codecConfig.sampleRate;
-        if (codecConfig.opusBitrate) CONFIG.opusBitrate = codecConfig.opusBitrate;
-        if (codecConfig.frameDuration) CONFIG.frameDuration = codecConfig.frameDuration;
-        if (codecConfig.jitterBufferFrames) CONFIG.jitterBufferFrames = codecConfig.jitterBufferFrames;
-
-        // 显示房间配置信息
-        if (roomConfigInfoEl && roomConfigDetailsEl) {
-            roomConfigInfoEl.style.display = 'block';
-            roomConfigDetailsEl.innerHTML = `
-                <div class="room-config-detail">
-                    <span class="label">采样率</span>
-                    <span class="value">${codecConfig.sampleRate / 1000} kHz</span>
-                </div>
-                <div class="room-config-detail">
-                    <span class="label">比特率</span>
-                    <span class="value">${codecConfig.opusBitrate / 1000} kbps</span>
-                </div>
-                <div class="room-config-detail">
-                    <span class="label">帧长</span>
-                    <span class="value">${(codecConfig.frameDuration * 1000).toFixed(0)} ms</span>
-                </div>
-                <div class="room-config-detail">
-                    <span class="label">抖动缓冲</span>
-                    <span class="value">${codecConfig.jitterBufferFrames} 帧 (${(codecConfig.jitterBufferFrames * codecConfig.frameDuration * 1000).toFixed(0)}ms)</span>
-                </div>
-            `;
-        }
-
-        console.log('[Config] Applied room config:', codecConfig);
-    }
-
-    // =============================================
-    // 配置面板启用/禁用
-    // =============================================
-    function enableConfigUI(enabled) {
-        const selects = [configSampleRateEl, configBitrateEl, configFrameDurationEl, configJitterEl];
-        selects.forEach(el => { if (el) el.disabled = !enabled; });
-        document.querySelectorAll('.preset-btn').forEach(b => { b.disabled = !enabled; });
     }
 
     // =============================================
@@ -909,25 +911,13 @@ const VOICE_APP = (() => {
         myPeerIdEl = document.getElementById('myPeerId');
         roomStatusEl = document.getElementById('roomStatus');
         roomIdDisplayEl = document.getElementById('roomIdDisplay');
-        configSectionEl = document.getElementById('configSection');
-        roomConfigInfoEl = document.getElementById('roomConfigInfo');
-        roomConfigDetailsEl = document.getElementById('roomConfigDetails');
-        configSampleRateEl = document.getElementById('configSampleRate');
-        configBitrateEl = document.getElementById('configBitrate');
-        configFrameDurationEl = document.getElementById('configFrameDuration');
-        configJitterEl = document.getElementById('configJitter');
 
         document.getElementById('joinBtn').onclick = joinRoom;
         document.getElementById('leaveBtn').onclick = leaveRoom;
-    muteBtnEl = document.getElementById('muteBtn');
-    if (muteBtnEl) {
-        muteBtnEl.onclick = toggleMute;
-    }
-
-        // 预设模式按钮
-        document.querySelectorAll('.preset-btn').forEach(btn => {
-            btn.addEventListener('click', () => applyPreset(btn.dataset.preset));
-        });
+        muteBtnEl = document.getElementById('muteBtn');
+        if (muteBtnEl) {
+            muteBtnEl.onclick = toggleMute;
+        }
 
         // 显示当前房间ID
         if (roomIdDisplayEl) {
@@ -936,7 +926,7 @@ const VOICE_APP = (() => {
 
         updateRoomStatus();
 
-        console.log(`[VoiceApp] Ready - Room: ${CONFIG.roomId}, WebSocket + WebCodecs`);
+        console.log(`[VoiceApp] Ready - Room: ${CONFIG.roomId}, params from server`);
         setStatus('⚡ 点击下方按钮加入语音通话', '#d4d4d4');
     }
 

@@ -1,7 +1,7 @@
 // =============================================
 // PCM AudioWorklet - SFU 多用户音频处理
-// 输入: 麦克风捕获 → 主线程编码
-// 输出: 多用户解码PCM混合 → 扬声器播放
+// 输入: 麦克风捕获(48kHz) → 主线程降采样→编码
+// 输出: 多用户解码PCM(升采样48kHz后)混合 → 扬声器播放
 // =============================================
 
 class VoiceWorklet extends AudioWorkletProcessor {
@@ -9,9 +9,9 @@ class VoiceWorklet extends AudioWorkletProcessor {
         super();
 
         // ---- 捕获端参数 ----
-        this._sampleRate = sampleRate; // AudioContext 的采样率
-        this._frameDuration = 0.04;    // 40ms 帧长
-        this._frameSamples = Math.floor(sampleRate * this._frameDuration);
+        this._sampleRate = sampleRate; // AudioContext 的采样率 (48kHz)
+        this._frameDuration = 0.06;    // 60ms 帧长（弱网优化）
+        this._frameSamples = Math.floor(sampleRate * this._frameDuration); // 2880 samples @48kHz
         this._captureBuffer = [];
 
         // ---- SFU 播放端参数 ----
@@ -20,21 +20,20 @@ class VoiceWorklet extends AudioWorkletProcessor {
         // ---- 状态 ----
         this._frameSeq = 0;
 
-        // ---- VAD (语音活动检测) 参数 ----
-        this._vadThreshold = 0.002;    // 能量阈值，低于此值视为静音
+        // ---- RMS 能量检测参数 ----
+        this._rmsThreshold = 0.015;    // 能量阈值，低于此值视为静音（SPEAKING_THRESHOLD）
         this._vadHangover = 3;         // 静音挂起帧数（避免频繁切换）
         this._vadHangoverCount = 0;    // 当前挂起计数
         this._isSpeaking = false;      // 当前是否在说话
-        this._vadEnabled = true;       // VAD 开关
 
         // 监听主线程消息
         this.port.onmessage = (event) => this._onMessage(event);
 
-        console.log(`[VoiceWorklet:SFU] Init: ${sampleRate}Hz, ${this._frameSamples}samples/frame`);
+        console.log(`[VoiceWorklet:SFU] Init: ${sampleRate}Hz, ${this._frameSamples}samples/frame (60ms)`);
     }
 
     /**
-     * VAD: 计算音频帧的能量（均方根 RMS）
+     * RMS: 计算音频帧的均方根能量
      * @param {Float32Array} samples - PCM 样本
      * @returns {number} 能量值
      */
@@ -47,16 +46,14 @@ class VoiceWorklet extends AudioWorkletProcessor {
     }
 
     /**
-     * VAD: 判断当前帧是否包含语音
+     * RMS 能量检测：判断当前帧是否包含语音
      * @param {Float32Array} samples - PCM 样本
      * @returns {boolean} true=有语音, false=静音
      */
     _isVoiceActive(samples) {
-        if (!this._vadEnabled) return true; // VAD 关闭时始终视为有语音
-
         const energy = this._calculateEnergy(samples);
 
-        if (energy > this._vadThreshold) {
+        if (energy > this._rmsThreshold) {
             // 检测到语音
             this._vadHangoverCount = this._vadHangover;
             this._isSpeaking = true;
@@ -79,15 +76,15 @@ class VoiceWorklet extends AudioWorkletProcessor {
         const data = event.data;
 
         if (data.type === 'pcm' && data.peerId) {
-            // SFU: peer-specific PCM data
+            // SFU: peer-specific PCM data (已升采样到48kHz)
             const pcm = data.data; // Float32Array
             if (!(pcm instanceof Float32Array)) return;
 
-            // 获取或创建此peer的环形缓冲区
+            // 获取或创建此peer的环形缓冲区（8帧抖动缓冲）
             let peerBuffer = this._peerBuffers.get(data.peerId);
             if (!peerBuffer) {
                 peerBuffer = {
-                    buffer: new Float32Array(this._frameSamples * 8), // 8帧缓冲
+                    buffer: new Float32Array(this._frameSamples * 8), // 8帧缓冲 (~480ms)
                     write: 0,
                     read: 0
                 };
@@ -163,12 +160,12 @@ class VoiceWorklet extends AudioWorkletProcessor {
             const channelData = input[0];
             this._captureBuffer.push(...channelData);
 
-            // 当积累够一帧时，发送给主线程编码
+            // 当积累够一帧时（60ms = 2880 samples @48kHz），发送给主线程编码
             if (this._captureBuffer.length >= this._frameSamples) {
                 const frame = new Float32Array(this._captureBuffer.slice(0, this._frameSamples));
                 this._captureBuffer = this._captureBuffer.slice(this._frameSamples);
 
-                // VAD: 检测当前帧是否包含语音
+                // RMS 能量检测：判断当前帧是否包含语音
                 const hasVoice = this._isVoiceActive(frame);
 
                 this.port.postMessage({
@@ -176,7 +173,7 @@ class VoiceWorklet extends AudioWorkletProcessor {
                     data: frame,
                     sampleRate: this._sampleRate,
                     seq: this._frameSeq++,
-                    hasVoice: hasVoice,       // VAD 结果
+                    hasVoice: hasVoice,       // RMS 检测结果
                     energy: this._calculateEnergy(frame) // 能量值（用于说话人指示器）
                 });
             }
@@ -196,11 +193,19 @@ class VoiceWorklet extends AudioWorkletProcessor {
                 const available = this._getPeerBufferedSamples(peerId);
                 if (available >= needed) {
                     const peerAudio = this._readFromPeerBuffer(peerId, needed);
-                    // 混合音频 (简单相加，之后可以添加音量控制)
+                    // 混合音频 (简单相加)
                     for (let i = 0; i < needed; i++) {
                         outputChannel[i] += peerAudio[i];
                     }
                     activePeers++;
+                }
+            }
+
+            // 音量均衡：多人同时说话时归一化，避免爆音
+            if (activePeers > 1) {
+                const gain = 1 / activePeers;
+                for (let i = 0; i < needed; i++) {
+                    outputChannel[i] *= gain;
                 }
             }
 

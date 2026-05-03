@@ -1,5 +1,5 @@
 // =============================================
-// WebSocket + WebCodecs 语音中继服务器
+// WebSocket + WebCodecs 语音中继服务器 (SFU 单房间多人)
 // 路由: / → 语音会议页面, /admin → 管理后台
 // =============================================
 const http = require('http');
@@ -14,7 +14,11 @@ function loadEnv() {
     const envFile = path.join(__dirname, '.env');
     const config = {
         PORT: 4001,
-        ADMIN_PASSWORD: 'admin123'
+        ADMIN_PASSWORD: 'admin123',
+        CODEC_SAMPLE_RATE: 8000,
+        CODEC_BITRATE: 16000,
+        CODEC_FRAME_DURATION: 0.06,
+        CODEC_JITTER_BUFFER: 8
     };
     try {
         const content = fs.readFileSync(envFile, 'utf-8');
@@ -248,6 +252,32 @@ function handleAdminAPI(req, res) {
         return;
     }
 
+    // ---- 获取当前编解码配置 ----
+    if (url === '/admin/api/codec-config' && req.method === 'GET') {
+        jsonResponse(200, { ...DEFAULT_CODEC_CONFIG });
+        return;
+    }
+
+    // ---- 更新默认编解码配置 ----
+    if (url === '/admin/api/codec-config' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+            try {
+                const config = JSON.parse(body);
+                if (config.sampleRate) DEFAULT_CODEC_CONFIG.sampleRate = config.sampleRate;
+                if (config.opusBitrate) DEFAULT_CODEC_CONFIG.opusBitrate = config.opusBitrate;
+                if (config.frameDuration) DEFAULT_CODEC_CONFIG.frameDuration = config.frameDuration;
+                if (config.jitterBufferFrames) DEFAULT_CODEC_CONFIG.jitterBufferFrames = config.jitterBufferFrames;
+                console.log('[ADMIN] Default codec config updated:', DEFAULT_CODEC_CONFIG);
+                jsonResponse(200, { ok: true, message: '配置已更新' });
+            } catch (e) {
+                jsonResponse(400, { ok: false, message: '请求格式错误' });
+            }
+        });
+        return;
+    }
+
     jsonResponse(404, { ok: false, message: '未知 API' });
 }
 
@@ -261,13 +291,13 @@ const wss = new WebSocket.Server({
 });
 
 // =============================================
-// 默认编解码配置
+// 默认编解码配置（从 .env 读取，管理员可在 /admin 页面动态修改）
 // =============================================
 const DEFAULT_CODEC_CONFIG = {
-    sampleRate: 48000,
-    frameDuration: 0.04,
-    opusBitrate: 32000,
-    jitterBufferFrames: 4
+    sampleRate: ENV.CODEC_SAMPLE_RATE,
+    frameDuration: ENV.CODEC_FRAME_DURATION,
+    opusBitrate: ENV.CODEC_BITRATE,
+    jitterBufferFrames: ENV.CODEC_JITTER_BUFFER
 };
 
 // =============================================
@@ -332,6 +362,18 @@ wss.on('connection', (ws) => {
         }
     });
 });
+
+// =============================================
+// 房间空置自动清理
+// =============================================
+function cleanupEmptyRooms() {
+    for (const [roomId, room] of rooms) {
+        if (room.peers.size === 0) {
+            rooms.delete(roomId);
+            console.log(`[CLEANUP] Removed empty room "${roomId}"`);
+        }
+    }
+}
 
 // =============================================
 // 加入房间
@@ -470,7 +512,7 @@ function broadcastBinaryToRoom(roomId, data, excludePeerId) {
 }
 
 // =============================================
-// 健康检查：定期清理断开的连接
+// 健康检查：定期清理断开的连接 + 空房间
 // =============================================
 setInterval(() => {
     for (const [pid, peer] of peers) {
@@ -484,6 +526,8 @@ setInterval(() => {
             console.log(`[CLEANUP] Removed stale peer "${pid}"`);
         }
     }
+    // 清理空房间
+    cleanupEmptyRooms();
 }, 30000);
 
 // =============================================
@@ -498,5 +542,5 @@ server.listen(PORT, () => {
     console.log(`  Default Codec: Opus ${DEFAULT_CODEC_CONFIG.opusBitrate/1000}kbps @ ${DEFAULT_CODEC_CONFIG.sampleRate/1000}kHz`);
     console.log(`  Service: ${serviceOn ? 'ON' : 'OFF'}`);
     console.log('═══════════════════════════════════════════');
-    console.log('[READY] Multi-room SFU WebCodecs Opus relay running');
+    console.log('[READY] SFU Meeting WebCodecs Opus relay running');
 });

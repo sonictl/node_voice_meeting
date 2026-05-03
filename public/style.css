@@ -361,3 +361,42 @@
             color: #4caf50;
             font-family: monospace;
         }
+
+        /* 固定编解码参数信息（只读） */
+        .codec-info-section {
+            background: #1e1e1e;
+            border-radius: 6px;
+            padding: 12px 14px;
+            margin: 10px 0;
+            border-left: 3px solid #4caf50;
+        }
+        .codec-info-section h3 {
+            font-size: 12px;
+            color: #888;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .codec-params {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 4px 12px;
+        }
+        .param-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 3px 0;
+            font-size: 13px;
+            border-bottom: 1px solid #2d2d2d;
+        }
+        .param-item .param-label {
+            color: #888;
+        }
+        .param-item .param-value {
+            color: #4caf50;
+            font-family: monospace;
+            font-weight: bold;
+        }
+        h1 .badge.weaknet {
+            background: #4caf50;
+        }
