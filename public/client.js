@@ -252,9 +252,8 @@ const VOICE_APP = (() => {
         const paramItems = document.querySelectorAll('.param-item');
         if (!paramItems.length) return;
 
-        // 按顺序更新: 采集采样率、编解码采样率、比特率、帧长、抖动缓冲、重采样、RMS阈值
+        // 按顺序更新: 编解码采样率、比特率、帧长、抖动缓冲、重采样、RMS阈值
         const values = [
-            `${CONFIG.captureSampleRate / 1000} kHz`,
             `${codecConfig.sampleRate / 1000} kHz`,
             `${codecConfig.opusBitrate / 1000} kbps`,
             `${(codecConfig.frameDuration * 1000).toFixed(0)} ms`,
