@@ -2,7 +2,7 @@
 // PCM AudioWorklet - SFU 多用户音频处理
 // 输入: 麦克风捕获(48kHz) → 主线程降采样→编码
 // 输出: 多用户解码PCM(升采样48kHz后)混合 → 扬声器播放
-// v1.0 - 2026-05-03
+// v1.1 - 2026-05-03 18:38:49
 // =============================================
 
 class VoiceWorklet extends AudioWorkletProcessor {
