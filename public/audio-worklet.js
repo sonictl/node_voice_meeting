@@ -8,14 +8,15 @@ class VoiceWorklet extends AudioWorkletProcessor {
     constructor() {
         super();
 
-        // ---- 捕获端参数 ----
+        // ---- 捕获端参数（默认值，等待主线程 config 消息覆盖） ----
         this._sampleRate = sampleRate; // AudioContext 的采样率 (48kHz)
-        this._frameDuration = 0.06;    // 60ms 帧长（弱网优化）
-        this._frameSamples = Math.floor(sampleRate * this._frameDuration); // 2880 samples @48kHz
+        this._frameDuration = 0.06;    // 默认60ms，由主线程 config 消息更新
+        this._frameSamples = Math.floor(sampleRate * this._frameDuration); // 默认2880 samples @48kHz
         this._captureBuffer = [];
 
         // ---- SFU 播放端参数 ----
         this._peerBuffers = new Map(); // peerId -> {buffer: Float32Array, write: number, read: number}
+        this._jitterBufferFrames = 8;  // 默认8帧，由主线程 config 消息更新
 
         // ---- 状态 ----
         this._frameSeq = 0;
@@ -29,7 +30,7 @@ class VoiceWorklet extends AudioWorkletProcessor {
         // 监听主线程消息
         this.port.onmessage = (event) => this._onMessage(event);
 
-        console.log(`[VoiceWorklet:SFU] Init: ${sampleRate}Hz, ${this._frameSamples}samples/frame (60ms)`);
+        console.log(`[VoiceWorklet:SFU] Init: ${sampleRate}Hz, ${this._frameSamples}samples/frame (default 60ms)`);
     }
 
     /**
@@ -74,6 +75,20 @@ class VoiceWorklet extends AudioWorkletProcessor {
      */
     _onMessage(event) {
         const data = event.data;
+
+        if (data.type === 'config') {
+            // 从主线程接收编解码参数配置
+            if (data.frameDuration) {
+                this._frameDuration = data.frameDuration;
+                this._frameSamples = Math.floor(this._sampleRate * this._frameDuration);
+                console.log(`[VoiceWorklet] Config: frameDuration=${data.frameDuration}s, frameSamples=${this._frameSamples}`);
+            }
+            if (data.jitterBufferFrames) {
+                this._jitterBufferFrames = data.jitterBufferFrames;
+                console.log(`[VoiceWorklet] Config: jitterBufferFrames=${data.jitterBufferFrames}`);
+            }
+            return;
+        }
 
         if (data.type === 'pcm' && data.peerId) {
             // SFU: peer-specific PCM data (已升采样到48kHz)

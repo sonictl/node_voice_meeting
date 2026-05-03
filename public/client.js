@@ -117,7 +117,7 @@ const VOICE_APP = (() => {
         const peerCount = roomPeers.size + (isJoined ? 1 : 0);
 
         if (!isJoined) {
-            roomStatusEl.innerHTML = '<span class="room-status waiting">☎️ 未加入通话.</span>';
+            roomStatusEl.innerHTML = '<span class="room-status waiting">☎️ 未加入通话...</span>';
         } else if (peerCount === 1) {
             roomStatusEl.innerHTML = '<span class="room-status waiting">⏳ 等待其他人加入...</span>';
         } else {
@@ -398,6 +398,14 @@ const VOICE_APP = (() => {
 
         // 创建 Worklet 节点
         workletNode = new AudioWorkletNode(audioCtx, 'voice-worklet');
+
+        // 通知 Worklet 当前编解码参数（帧长等）
+        workletNode.port.postMessage({
+            type: 'config',
+            frameDuration: codecConfig.frameDuration,
+            sampleRate: CONFIG.captureSampleRate,
+            jitterBufferFrames: codecConfig.jitterBufferFrames
+        });
 
         // 监听 Worklet 消息
         workletNode.port.onmessage = async (event) => {
