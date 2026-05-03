@@ -22,7 +22,7 @@ class VoiceWorklet extends AudioWorkletProcessor {
         this._frameSeq = 0;
 
         // ---- RMS 能量检测参数 ----
-        this._rmsThreshold = 0.015;    // 能量阈值，低于此值视为静音（SPEAKING_THRESHOLD）
+        this._rmsThreshold = 0.008;    // 能量阈值，降低阈值避免误判静音
         this._vadHangover = 3;         // 静音挂起帧数（避免频繁切换）
         this._vadHangoverCount = 0;    // 当前挂起计数
         this._isSpeaking = false;      // 当前是否在说话

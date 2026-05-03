@@ -807,22 +807,16 @@ const VOICE_APP = (() => {
 
         // 跳过发送者ID，获取原始音频包
         const audioData = data.subarray(offset);
-        if (audioData.length <= 8) return;
+        if (audioData.length <= 8) return; // 只有头部没有数据
 
         // 解析头部
-        const alignedBuf = new Uint8Array(8);
-        alignedBuf[0] = audioData[0];
-        alignedBuf[1] = audioData[1];
-        alignedBuf[2] = audioData[2];
-        alignedBuf[3] = audioData[3];
-        alignedBuf[4] = audioData[4];
-        alignedBuf[5] = audioData[5];
-        alignedBuf[6] = audioData[6];
-        alignedBuf[7] = audioData[7];
-        const sampleRate = alignedBuf[0] | (alignedBuf[1] << 8);
-        const packetSeq = alignedBuf[2] | (alignedBuf[3] << 8);
-        const timestamp = (alignedBuf[4] | (alignedBuf[5] << 8) | (alignedBuf[6] << 16) | (alignedBuf[7] << 24)) >>> 0;
+        const sampleRate = audioData[0] | (audioData[1] << 8);
+        const packetSeq = audioData[2] | (audioData[3] << 8);
+        const timestamp = (audioData[4] | (audioData[5] << 8) | (audioData[6] << 16) | (audioData[7] << 24)) >>> 0;
         const opusData = audioData.subarray(8);
+
+        // 跳过空数据包
+        if (opusData.length === 0) return;
 
         stats.packetsRecv++;
         stats.bytesRecv += data.length;
