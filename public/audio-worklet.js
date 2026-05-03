@@ -207,13 +207,13 @@ class VoiceWorklet extends AudioWorkletProcessor {
             }
         }
 
-        // ---- SFU 播放端: 混合所有peer音频 ----
+        // ---- SFU 播放端: 混合所有peer音频（输出到所有声道，避免单声道问题） ----
         if (output && output[0]) {
-            const outputChannel = output[0];
-            const needed = outputChannel.length;
+            const needed = output[0].length;
 
-            // 初始化输出为静音
-            outputChannel.fill(0);
+            // 先混合到临时缓冲区
+            const mixed = new Float32Array(needed);
+            mixed.fill(0);
 
             // 从每个peer缓冲区读取并混合
             let activePeers = 0;
@@ -226,7 +226,7 @@ class VoiceWorklet extends AudioWorkletProcessor {
                     const peerAudio = this._readFromPeerBuffer(peerId, needed);
                     // 混合音频 (简单相加)
                     for (let i = 0; i < needed; i++) {
-                        outputChannel[i] += peerAudio[i];
+                        mixed[i] += peerAudio[i];
                     }
                     activePeers++;
                 } else {
@@ -240,7 +240,15 @@ class VoiceWorklet extends AudioWorkletProcessor {
             if (activePeers > 1) {
                 const gain = 1 / activePeers;
                 for (let i = 0; i < needed; i++) {
-                    outputChannel[i] *= gain;
+                    mixed[i] *= gain;
+                }
+            }
+
+            // 将混合后的音频复制到所有输出声道（解决单声道问题）
+            for (let ch = 0; ch < output.length; ch++) {
+                const outChannel = output[ch];
+                for (let i = 0; i < needed; i++) {
+                    outChannel[i] = mixed[i];
                 }
             }
 
