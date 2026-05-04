@@ -607,9 +607,10 @@ const peers = new Map();   // peerId -> { ws, roomId }
 // =============================================
 // WebSocket 事件处理
 // =============================================
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
     let peerId = null;
     let roomId = null;
+    const wsClientIP = getClientIP(req);
 
     // ---- 检查服务是否开启 ----
     if (!serviceOn) {
@@ -621,6 +622,8 @@ wss.on('connection', (ws) => {
         return;
     }
 
+    addAuditLog('WS_CONNECT', wsClientIP, 'WebSocket connected');
+
     // ---- 消息处理 ----
     ws.on('message', (data, isBinary) => {
         try {
@@ -631,8 +634,14 @@ wss.on('connection', (ws) => {
                 switch (msg.type) {
                     case 'join':
                         ({ peerId, roomId } = handleJoin(ws, msg, peerId, roomId));
+                        if (peerId && roomId) {
+                            addAuditLog('PEER_JOIN', wsClientIP, `Peer "${peerId}" joined room "${roomId}"`);
+                        }
                         break;
                     case 'leave':
+                        if (peerId && roomId) {
+                            addAuditLog('PEER_LEAVE', wsClientIP, `Peer "${peerId}" left room "${roomId}"`);
+                        }
                         handleLeave(ws, peerId, roomId);
                         peerId = null;
                         roomId = null;
@@ -650,7 +659,10 @@ wss.on('connection', (ws) => {
     // ---- 断开连接 ----
     ws.on('close', () => {
         if (peerId && roomId) {
+            addAuditLog('WS_DISCONNECT', wsClientIP, `Peer "${peerId}" disconnected from room "${roomId}"`);
             handleLeave(ws, peerId, roomId);
+        } else {
+            addAuditLog('WS_DISCONNECT', wsClientIP, 'WebSocket disconnected (unregistered)');
         }
     });
 
