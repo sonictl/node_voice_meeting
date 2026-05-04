@@ -727,9 +727,11 @@
             }
             
             listEl.innerHTML = data.logs.map(entry => {
-                const time = new Date(entry.timestamp).toLocaleTimeString('zh-CN', { hour12: false });
+                const d = new Date(entry.timestamp);
+                const date = d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
+                const time = d.toLocaleTimeString('zh-CN', { hour12: false });
                 return `<div class="audit-entry">
-                    <span class="audit-time">[${time}]</span>
+                    <span class="audit-time">[${date} ${time}]</span>
                     <span class="audit-action">${escapeHtml(entry.action)}</span>
                     <span class="audit-ip">${escapeHtml(entry.ip)}</span>
                     ${entry.details ? `<span style="color:#888;">— ${escapeHtml(entry.details)}</span>` : ''}
