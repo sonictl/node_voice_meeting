@@ -5,6 +5,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 
 // =============================================
@@ -57,6 +58,167 @@ const MIME_TYPES = {
 let serviceOn = true;
 
 // =============================================
+// 安全模块
+// =============================================
+
+// ---- Session 存储（内存中） ----
+const sessions = new Map(); // sessionToken -> { createdAt, ip }
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24小时过期
+
+// ---- 速率限制 ----
+const rateLimitMap = new Map(); // ip -> { count, resetTime }
+const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1分钟窗口
+const RATE_LIMIT_MAX_LOGIN = 5;          // 登录：5次/分钟/IP
+const RATE_LIMIT_MAX_API = 30;           // 管理API：30次/分钟/IP
+
+// ---- CSRF Token 存储 ----
+const csrfTokens = new Map(); // sessionToken -> csrfToken
+
+// ---- 审计日志 ----
+const auditLog = [];
+
+/**
+ * 生成随机 Session Token
+ */
+function generateSessionToken() {
+    return crypto.randomBytes(32).toString('hex');
+}
+
+/**
+ * 生成 CSRF Token
+ */
+function generateCsrfToken() {
+    return crypto.randomBytes(16).toString('hex');
+}
+
+/**
+ * 清理过期 Session
+ */
+function cleanupSessions() {
+    const now = Date.now();
+    for (const [token, session] of sessions) {
+        if (now - session.createdAt > SESSION_TTL_MS) {
+            sessions.delete(token);
+            csrfTokens.delete(token);
+        }
+    }
+}
+setInterval(cleanupSessions, 60 * 60 * 1000); // 每小时清理一次
+
+/**
+ * 速率限制检查
+ * @param {string} ip - 客户端 IP
+ * @param {number} maxRequests - 最大请求数
+ * @returns {boolean} true 表示允许，false 表示被限制
+ */
+function checkRateLimit(ip, maxRequests) {
+    const now = Date.now();
+    let entry = rateLimitMap.get(ip);
+    
+    if (!entry || now > entry.resetTime) {
+        entry = { count: 0, resetTime: now + RATE_LIMIT_WINDOW_MS };
+        rateLimitMap.set(ip, entry);
+    }
+    
+    entry.count++;
+    return entry.count <= maxRequests;
+}
+
+/**
+ * 清理过期的速率限制记录
+ */
+function cleanupRateLimits() {
+    const now = Date.now();
+    for (const [ip, entry] of rateLimitMap) {
+        if (now > entry.resetTime) {
+            rateLimitMap.delete(ip);
+        }
+    }
+}
+setInterval(cleanupRateLimits, 60 * 1000); // 每分钟清理一次
+
+/**
+ * 获取客户端 IP
+ */
+function getClientIP(req) {
+    return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 
+           req.socket.remoteAddress || 
+           'unknown';
+}
+
+/**
+ * 验证 Session Token
+ * @returns {object|null} 如果有效返回 session 对象，否则返回 null
+ */
+function validateSession(req) {
+    // 从 Cookie 或 Authorization Header 获取 Token
+    const cookieHeader = req.headers['cookie'] || '';
+    const cookies = Object.fromEntries(
+        cookieHeader.split(';').filter(Boolean).map(c => {
+            const [k, ...v] = c.trim().split('=');
+            return [k, v.join('=')];
+        })
+    );
+    
+    let token = cookies['admin_session'];
+    
+    // 如果没有 Cookie，尝试从 Authorization Header 获取
+    if (!token) {
+        const authHeader = req.headers['authorization'];
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+            token = authHeader.slice(7);
+        }
+    }
+    
+    if (!token) return null;
+    
+    const session = sessions.get(token);
+    if (!session) return null;
+    
+    // 检查是否过期
+    if (Date.now() - session.createdAt > SESSION_TTL_MS) {
+        sessions.delete(token);
+        csrfTokens.delete(token);
+        return null;
+    }
+    
+    return { token, ...session };
+}
+
+/**
+ * 验证 CSRF Token
+ */
+function validateCsrfToken(req, sessionToken) {
+    const csrfToken = csrfTokens.get(sessionToken);
+    if (!csrfToken) return false;
+    
+    // 从请求体或 Header 获取 CSRF Token
+    const bodyCsrf = req.bodyCsrf || '';
+    const headerCsrf = req.headers['x-csrf-token'] || '';
+    
+    return bodyCsrf === csrfToken || headerCsrf === csrfToken;
+}
+
+/**
+ * 添加审计日志
+ */
+function addAuditLog(action, ip, details = '') {
+    const entry = {
+        timestamp: new Date().toISOString(),
+        action,
+        ip,
+        details
+    };
+    auditLog.push(entry);
+    console.log(`[AUDIT] ${entry.timestamp} | ${action} | IP: ${ip} | ${details}`);
+    
+    // 只保留最近 1000 条日志
+    if (auditLog.length > 1000) {
+        auditLog.splice(0, auditLog.length - 1000);
+    }
+}
+
+// =============================================
 // HTTP 静态文件服务器
 // =============================================
 const server = http.createServer((req, res) => {
@@ -74,7 +236,7 @@ const server = http.createServer((req, res) => {
 
     // ---- /admin 管理后台 ----
     if (url === '/admin') {
-        serveAdminPage(res);
+        serveAdminPage(req, res);
         return;
     }
 
@@ -125,16 +287,30 @@ function serveMaintenancePage(res) {
     });
 }
 
-function serveAdminPage(res) {
+function serveAdminPage(req, res) {
     const filePath = path.join(__dirname, 'public', 'admin.html');
-    fs.readFile(filePath, (err, data) => {
+    fs.readFile(filePath, 'utf-8', (err, data) => {
         if (err) {
             res.writeHead(500);
             res.end('Internal Server Error');
             return;
         }
+        
+        // 检查是否有有效的 Session（用于页面加载时注入 CSRF Token）
+        const session = validateSession(req);
+        let csrfToken = '';
+        if (session) {
+            csrfToken = csrfTokens.get(session.token) || '';
+        }
+        
+        // 注入 CSRF Token 到页面
+        const injected = data.replace(
+            '</head>',
+            `<script>window.__CSRF_TOKEN__ = ${JSON.stringify(csrfToken)};</script>\n</head>`
+        );
+        
         res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(data);
+        res.end(injected);
     });
 }
 
@@ -179,25 +355,49 @@ function serveStaticFile(url, res) {
 // =============================================
 function handleAdminAPI(req, res) {
     const url = req.url;
+    const clientIP = getClientIP(req);
 
     function jsonResponse(statusCode, data) {
         res.writeHead(statusCode, {
             'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*'
+            'Access-Control-Allow-Origin': 'null' // 不允许跨域
         });
         res.end(JSON.stringify(data));
     }
 
     // ---- 认证 ----
     if (url === '/admin/api/auth' && req.method === 'POST') {
+        // 速率限制：登录接口
+        if (!checkRateLimit(`login:${clientIP}`, RATE_LIMIT_MAX_LOGIN)) {
+            addAuditLog('LOGIN_RATE_LIMITED', clientIP, 'Too many login attempts');
+            return jsonResponse(429, { ok: false, message: '登录尝试过于频繁，请稍后再试' });
+        }
+
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', () => {
             try {
                 const { password } = JSON.parse(body);
                 if (password === ADMIN_PASSWORD) {
-                    jsonResponse(200, { ok: true });
+                    // 生成 Session Token
+                    const token = generateSessionToken();
+                    sessions.set(token, { createdAt: Date.now(), ip: clientIP });
+                    
+                    // 生成 CSRF Token
+                    const csrfToken = generateCsrfToken();
+                    csrfTokens.set(token, csrfToken);
+                    
+                    addAuditLog('LOGIN_SUCCESS', clientIP, 'Admin login successful');
+                    
+                    // 设置 Cookie
+                    res.setHeader('Set-Cookie', [
+                        `admin_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}`,
+                        `X-CSRF-Token=${csrfToken}; SameSite=Strict; Path=/`
+                    ]);
+                    
+                    jsonResponse(200, { ok: true, csrfToken });
                 } else {
+                    addAuditLog('LOGIN_FAILED', clientIP, 'Wrong password');
                     jsonResponse(200, { ok: false, message: '密码错误' });
                 }
             } catch (e) {
@@ -205,6 +405,38 @@ function handleAdminAPI(req, res) {
             }
         });
         return;
+    }
+
+    // ---- 登出 ----
+    if (url === '/admin/api/logout' && req.method === 'POST') {
+        const session = validateSession(req);
+        if (session) {
+            sessions.delete(session.token);
+            csrfTokens.delete(session.token);
+            addAuditLog('LOGOUT', clientIP, 'Admin logged out');
+        }
+        
+        // 清除 Cookie
+        res.setHeader('Set-Cookie', [
+            'admin_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0',
+            'X-CSRF-Token=; SameSite=Strict; Path=/; Max-Age=0'
+        ]);
+        
+        jsonResponse(200, { ok: true });
+        return;
+    }
+
+    // ---- 以下所有 API 需要认证 ----
+    const session = validateSession(req);
+    if (!session) {
+        addAuditLog('API_UNAUTHORIZED', clientIP, `Unauthorized access to ${url}`);
+        return jsonResponse(401, { ok: false, message: '未授权，请先登录' });
+    }
+
+    // ---- 速率限制：管理 API ----
+    if (!checkRateLimit(`api:${clientIP}`, RATE_LIMIT_MAX_API)) {
+        addAuditLog('API_RATE_LIMITED', clientIP, `Rate limited on ${url}`);
+        return jsonResponse(429, { ok: false, message: '请求过于频繁，请稍后再试' });
     }
 
     // ---- 获取状态 ----
@@ -218,37 +450,68 @@ function handleAdminAPI(req, res) {
         return;
     }
 
-    // ---- 关闭服务 ----
+    // ---- 关闭服务（需要 CSRF 验证） ----
     if (url === '/admin/api/stop' && req.method === 'POST') {
-        if (!serviceOn) {
-            jsonResponse(200, { ok: false, message: '服务已经关闭' });
-            return;
-        }
-        serviceOn = false;
-
-        wss.clients.forEach(client => {
-            if (client.readyState === WebSocket.OPEN) {
-                client.close(1001, '服务维护中');
+        // 读取请求体以获取 CSRF Token
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+            try {
+                const parsed = JSON.parse(body);
+                req.bodyCsrf = parsed._csrf;
+            } catch (e) {}
+            
+            if (!validateCsrfToken(req, session.token)) {
+                addAuditLog('CSRF_FAILED', clientIP, 'CSRF token validation failed for stop');
+                return jsonResponse(403, { ok: false, message: 'CSRF 验证失败' });
             }
+            
+            if (!serviceOn) {
+                jsonResponse(200, { ok: false, message: '服务已经关闭' });
+                return;
+            }
+            serviceOn = false;
+
+            wss.clients.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.close(1001, '服务维护中');
+                }
+            });
+
+            rooms.clear();
+            peers.clear();
+
+            addAuditLog('SERVICE_STOP', clientIP, 'Service stopped by admin');
+            console.log('[ADMIN] Service stopped by admin');
+            jsonResponse(200, { ok: true, message: '服务已关闭' });
         });
-
-        rooms.clear();
-        peers.clear();
-
-        console.log('[ADMIN] Service stopped by admin');
-        jsonResponse(200, { ok: true, message: '服务已关闭' });
         return;
     }
 
-    // ---- 开启服务 ----
+    // ---- 开启服务（需要 CSRF 验证） ----
     if (url === '/admin/api/start' && req.method === 'POST') {
-        if (serviceOn) {
-            jsonResponse(200, { ok: false, message: '服务已经开启' });
-            return;
-        }
-        serviceOn = true;
-        console.log('[ADMIN] Service started by admin');
-        jsonResponse(200, { ok: true, message: '服务已开启' });
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+            try {
+                const parsed = JSON.parse(body);
+                req.bodyCsrf = parsed._csrf;
+            } catch (e) {}
+            
+            if (!validateCsrfToken(req, session.token)) {
+                addAuditLog('CSRF_FAILED', clientIP, 'CSRF token validation failed for start');
+                return jsonResponse(403, { ok: false, message: 'CSRF 验证失败' });
+            }
+            
+            if (serviceOn) {
+                jsonResponse(200, { ok: false, message: '服务已经开启' });
+                return;
+            }
+            serviceOn = true;
+            addAuditLog('SERVICE_START', clientIP, 'Service started by admin');
+            console.log('[ADMIN] Service started by admin');
+            jsonResponse(200, { ok: true, message: '服务已开启' });
+        });
         return;
     }
 
@@ -258,23 +521,58 @@ function handleAdminAPI(req, res) {
         return;
     }
 
-    // ---- 更新默认编解码配置 ----
+    // ---- 更新默认编解码配置（需要 CSRF 验证） ----
     if (url === '/admin/api/codec-config' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', () => {
             try {
                 const config = JSON.parse(body);
+                req.bodyCsrf = config._csrf;
+                
+                if (!validateCsrfToken(req, session.token)) {
+                    addAuditLog('CSRF_FAILED', clientIP, 'CSRF token validation failed for codec-config');
+                    return jsonResponse(403, { ok: false, message: 'CSRF 验证失败' });
+                }
+                
+                // 输入验证：检查参数范围
+                const validSampleRates = [8000, 16000, 24000, 48000];
+                const validBitrates = [8000, 16000, 32000, 64000];
+                const validFrameDurations = [0.02, 0.04, 0.06, 0.12];
+                const validJitterBuffers = [2, 4, 6, 8];
+                
+                if (config.sampleRate && !validSampleRates.includes(config.sampleRate)) {
+                    return jsonResponse(400, { ok: false, message: '无效的采样率' });
+                }
+                if (config.opusBitrate && !validBitrates.includes(config.opusBitrate)) {
+                    return jsonResponse(400, { ok: false, message: '无效的比特率' });
+                }
+                if (config.frameDuration && !validFrameDurations.includes(config.frameDuration)) {
+                    return jsonResponse(400, { ok: false, message: '无效的帧长' });
+                }
+                if (config.jitterBufferFrames && !validJitterBuffers.includes(config.jitterBufferFrames)) {
+                    return jsonResponse(400, { ok: false, message: '无效的抖动缓冲帧数' });
+                }
+                
                 if (config.sampleRate) DEFAULT_CODEC_CONFIG.sampleRate = config.sampleRate;
                 if (config.opusBitrate) DEFAULT_CODEC_CONFIG.opusBitrate = config.opusBitrate;
                 if (config.frameDuration) DEFAULT_CODEC_CONFIG.frameDuration = config.frameDuration;
                 if (config.jitterBufferFrames) DEFAULT_CODEC_CONFIG.jitterBufferFrames = config.jitterBufferFrames;
+                
+                addAuditLog('CODEC_CONFIG_UPDATE', clientIP, 
+                    `Updated: sampleRate=${DEFAULT_CODEC_CONFIG.sampleRate}, bitrate=${DEFAULT_CODEC_CONFIG.opusBitrate}, frameDuration=${DEFAULT_CODEC_CONFIG.frameDuration}, jitter=${DEFAULT_CODEC_CONFIG.jitterBufferFrames}`);
                 console.log('[ADMIN] Default codec config updated:', DEFAULT_CODEC_CONFIG);
                 jsonResponse(200, { ok: true, message: '配置已更新' });
             } catch (e) {
                 jsonResponse(400, { ok: false, message: '请求格式错误' });
             }
         });
+        return;
+    }
+
+    // ---- 获取审计日志（需要 CSRF 验证） ----
+    if (url === '/admin/api/audit-log' && req.method === 'GET') {
+        jsonResponse(200, { logs: auditLog.slice(-50) }); // 返回最近50条
         return;
     }
 

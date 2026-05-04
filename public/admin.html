@@ -13,14 +13,15 @@
             min-height: 100vh;
             display: flex;
             justify-content: center;
-            align-items: center;
+            align-items: flex-start;
+            padding: 20px;
         }
         .container {
             background: #2d2d2d;
             padding: 28px;
             border-radius: 12px;
             box-shadow: 0 4px 20px rgba(0,0,0,0.4);
-            width: 520px;
+            width: 600px;
             max-width: 95vw;
         }
         h1 {
@@ -106,6 +107,15 @@
         }
         .btn-start:hover:not(:disabled) {
             background: #5cbf60;
+        }
+        .btn-logout {
+            background: #888;
+            font-size: 12px;
+            padding: 6px 12px;
+            flex: none;
+        }
+        .btn-logout:hover:not(:disabled) {
+            background: #999;
         }
         .status-bar {
             background: #1e1e1e;
@@ -250,6 +260,66 @@
         .btn-apply-config:hover {
             background: #5cbf60;
         }
+
+        /* 审计日志样式 */
+        .audit-section {
+            background: #1e1e1e;
+            border-radius: 6px;
+            padding: 14px;
+            margin: 12px 0;
+        }
+        .audit-section h3 {
+            font-size: 14px;
+            color: #d4d4d4;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .audit-log-list {
+            max-height: 200px;
+            overflow-y: auto;
+            font-size: 11px;
+            font-family: monospace;
+        }
+        .audit-log-list::-webkit-scrollbar {
+            width: 6px;
+        }
+        .audit-log-list::-webkit-scrollbar-thumb {
+            background: #555;
+            border-radius: 3px;
+        }
+        .audit-entry {
+            padding: 4px 0;
+            border-bottom: 1px solid #333;
+            color: #aaa;
+        }
+        .audit-entry:last-child {
+            border-bottom: none;
+        }
+        .audit-entry .audit-time {
+            color: #888;
+        }
+        .audit-entry .audit-action {
+            color: #4caf50;
+        }
+        .audit-entry .audit-ip {
+            color: #0e639c;
+        }
+        .btn-refresh-audit {
+            background: #555;
+            padding: 4px 10px;
+            font-size: 11px;
+            flex: none;
+        }
+        .btn-refresh-audit:hover {
+            background: #666;
+        }
+        .audit-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
     </style>
 </head>
 <body>
@@ -271,6 +341,11 @@
 
         <!-- 管理面板 -->
         <div id="dashboardSection" class="dashboard-section hidden">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="font-size:13px; color:#888;">管理控制台</span>
+                <button class="btn-logout" onclick="logout()">🚪 退出登录</button>
+            </div>
+
             <div class="status-bar" id="serviceStatusBar">
                 <span id="serviceStatusText">检查中...</span>
             </div>
@@ -340,6 +415,17 @@
                 <div id="configMsg" class="success-msg hidden"></div>
             </div>
 
+            <!-- 审计日志面板 -->
+            <div class="audit-section">
+                <div class="audit-header">
+                    <h3>📋 操作审计日志</h3>
+                    <button class="btn-refresh-audit" onclick="loadAuditLog()">🔄 刷新</button>
+                </div>
+                <div id="auditLogList" class="audit-log-list">
+                    <span style="color:#666; font-size:12px;">加载中...</span>
+                </div>
+            </div>
+
             <div class="btn-group">
                 <button id="stopBtn" class="btn-stop" onclick="stopService()">⏹️ 关闭服务</button>
                 <button id="startBtn" class="btn-start hidden" onclick="startService()">▶️ 开启服务</button>
@@ -356,6 +442,7 @@
     <script>
         let isAuthenticated = false;
         let statusInterval = null;
+        let csrfToken = window.__CSRF_TOKEN__ || '';
 
         // 编解码配置预设
         const PRESETS = {
@@ -365,6 +452,78 @@
             'low-latency':  { sampleRate: 48000, bitrate: 64000, frameDuration: 0.02, jitter: 2 }
         };
 
+        /**
+         * 获取 CSRF Token（从 Cookie 或 window 变量）
+         */
+        function getCsrfToken() {
+            // 优先使用页面注入的 CSRF Token
+            if (csrfToken) return csrfToken;
+            
+            // 尝试从 Cookie 获取
+            const match = document.cookie.match(/(?:^|;\s*)X-CSRF-Token=([^;]*)/);
+            if (match) {
+                csrfToken = decodeURIComponent(match[1]);
+                return csrfToken;
+            }
+            return '';
+        }
+
+        /**
+         * 发送带认证的 API 请求
+         */
+        async function apiRequest(url, options = {}) {
+            const method = options.method || 'GET';
+            const body = options.body || null;
+            
+            const fetchOptions = {
+                method,
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                credentials: 'same-origin' // 发送 Cookie
+            };
+            
+            // 对 POST 请求添加 CSRF Token
+            if (method === 'POST' && body) {
+                const parsed = JSON.parse(body);
+                parsed._csrf = getCsrfToken();
+                fetchOptions.body = JSON.stringify(parsed);
+            } else if (method === 'POST') {
+                fetchOptions.body = JSON.stringify({ _csrf: getCsrfToken() });
+            }
+            
+            const res = await fetch(url, fetchOptions);
+            const data = await res.json();
+            
+            // 如果返回 401，说明 Session 过期，跳转到登录页
+            if (res.status === 401) {
+                isAuthenticated = false;
+                document.getElementById('loginSection').classList.remove('hidden');
+                document.getElementById('dashboardSection').classList.add('hidden');
+                document.getElementById('loginError').textContent = '⏰ 会话已过期，请重新登录';
+                document.getElementById('loginError').classList.remove('hidden');
+                if (statusInterval) {
+                    clearInterval(statusInterval);
+                    statusInterval = null;
+                }
+                return null;
+            }
+            
+            // 如果返回 429，说明被速率限制
+            if (res.status === 429) {
+                showActionMsg('⚠️ 请求过于频繁，请稍后再试');
+                return null;
+            }
+            
+            // 如果返回 403，说明 CSRF 验证失败
+            if (res.status === 403) {
+                showActionMsg('⚠️ CSRF 验证失败，请刷新页面重试');
+                return null;
+            }
+            
+            return data;
+        }
+
         async function login() {
             const password = document.getElementById('passwordInput').value;
             const errorEl = document.getElementById('loginError');
@@ -373,17 +532,24 @@
                 const res = await fetch('/admin/api/auth', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ password })
+                    body: JSON.stringify({ password }),
+                    credentials: 'same-origin'
                 });
                 const data = await res.json();
                 
                 if (data.ok) {
+                    // 保存 CSRF Token
+                    if (data.csrfToken) {
+                        csrfToken = data.csrfToken;
+                    }
+                    
                     isAuthenticated = true;
                     document.getElementById('loginSection').classList.add('hidden');
                     document.getElementById('dashboardSection').classList.remove('hidden');
                     errorEl.classList.add('hidden');
                     loadStatus();
-                    loadCodecConfig(); // 加载服务器当前编解码配置
+                    loadCodecConfig();
+                    loadAuditLog();
                     statusInterval = setInterval(loadStatus, 3000);
                     initPresetButtons();
                 } else {
@@ -396,56 +562,66 @@
             }
         }
 
-        async function loadStatus() {
+        async function logout() {
             try {
-                const res = await fetch('/admin/api/status');
-                const data = await res.json();
-                
-                const statusText = document.getElementById('serviceStatusText');
-                const statusBar = document.getElementById('serviceStatusBar');
-                const stopBtn = document.getElementById('stopBtn');
-                const startBtn = document.getElementById('startBtn');
-
-                document.getElementById('infoAddress').textContent = data.address;
-                document.getElementById('infoRooms').textContent = data.rooms;
-                document.getElementById('infoPeers').textContent = data.peers;
-
-                if (data.serviceOn) {
-                    statusText.textContent = '🟢 服务运行中';
-                    statusBar.className = 'status-bar status-online';
-                    stopBtn.classList.remove('hidden');
-                    startBtn.classList.add('hidden');
-                } else {
-                    statusText.textContent = '🔴 服务已关闭';
-                    statusBar.className = 'status-bar status-offline';
-                    stopBtn.classList.add('hidden');
-                    startBtn.classList.remove('hidden');
-                }
+                await apiRequest('/admin/api/logout', { method: 'POST' });
             } catch (err) {
-                console.error('[Admin] Status error:', err);
+                console.error('[Admin] Logout error:', err);
+            }
+            
+            isAuthenticated = false;
+            document.getElementById('loginSection').classList.remove('hidden');
+            document.getElementById('dashboardSection').classList.add('hidden');
+            if (statusInterval) {
+                clearInterval(statusInterval);
+                statusInterval = null;
+            }
+        }
+
+        async function loadStatus() {
+            const data = await apiRequest('/admin/api/status');
+            if (!data) return;
+            
+            const statusText = document.getElementById('serviceStatusText');
+            const statusBar = document.getElementById('serviceStatusBar');
+            const stopBtn = document.getElementById('stopBtn');
+            const startBtn = document.getElementById('startBtn');
+
+            document.getElementById('infoAddress').textContent = data.address;
+            document.getElementById('infoRooms').textContent = data.rooms;
+            document.getElementById('infoPeers').textContent = data.peers;
+
+            if (data.serviceOn) {
+                statusText.textContent = '🟢 服务运行中';
+                statusBar.className = 'status-bar status-online';
+                stopBtn.classList.remove('hidden');
+                startBtn.classList.add('hidden');
+            } else {
+                statusText.textContent = '🔴 服务已关闭';
+                statusBar.className = 'status-bar status-offline';
+                stopBtn.classList.add('hidden');
+                startBtn.classList.remove('hidden');
             }
         }
 
         async function stopService() {
             if (!confirm('确定要关闭语音会议服务吗？所有在线用户将被断开。')) return;
-            try {
-                const res = await fetch('/admin/api/stop', { method: 'POST' });
-                const data = await res.json();
-                showActionMsg(data.ok ? '✅ 服务已关闭' : '❌ ' + (data.message || '操作失败'));
-                if (data.ok) loadStatus();
-            } catch (err) {
-                showActionMsg('❌ 操作失败: ' + err.message);
+            const data = await apiRequest('/admin/api/stop', { method: 'POST' });
+            if (!data) return;
+            showActionMsg(data.ok ? '✅ 服务已关闭' : '❌ ' + (data.message || '操作失败'));
+            if (data.ok) {
+                loadStatus();
+                loadAuditLog();
             }
         }
 
         async function startService() {
-            try {
-                const res = await fetch('/admin/api/start', { method: 'POST' });
-                const data = await res.json();
-                showActionMsg(data.ok ? '✅ 服务已开启' : '❌ ' + (data.message || '操作失败'));
-                if (data.ok) loadStatus();
-            } catch (err) {
-                showActionMsg('❌ 操作失败: ' + err.message);
+            const data = await apiRequest('/admin/api/start', { method: 'POST' });
+            if (!data) return;
+            showActionMsg(data.ok ? '✅ 服务已开启' : '❌ ' + (data.message || '操作失败'));
+            if (data.ok) {
+                loadStatus();
+                loadAuditLog();
             }
         }
 
@@ -458,43 +634,36 @@
 
         // ---- 编解码配置管理 ----
 
-        /**
-         * 从服务器获取当前编解码配置并显示在面板上
-         */
         async function loadCodecConfig() {
-            try {
-                const res = await fetch('/admin/api/codec-config');
-                const config = await res.json();
-                
-                if (config.sampleRate) {
-                    document.getElementById('configSampleRate').value = config.sampleRate;
-                }
-                if (config.opusBitrate) {
-                    document.getElementById('configBitrate').value = config.opusBitrate;
-                }
-                if (config.frameDuration) {
-                    document.getElementById('configFrameDuration').value = config.frameDuration;
-                }
-                if (config.jitterBufferFrames) {
-                    document.getElementById('configJitter').value = config.jitterBufferFrames;
-                }
-
-                // 匹配对应的预设模式并高亮
-                for (const [name, preset] of Object.entries(PRESETS)) {
-                    if (preset.sampleRate === config.sampleRate &&
-                        preset.bitrate === config.opusBitrate &&
-                        preset.frameDuration === config.frameDuration &&
-                        preset.jitter === config.jitterBufferFrames) {
-                        document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
-                        document.querySelector(`.preset-btn[data-preset="${name}"]`)?.classList.add('active');
-                        break;
-                    }
-                }
-
-                console.log('[Admin] Loaded server config:', config);
-            } catch (err) {
-                console.error('[Admin] Failed to load codec config:', err);
+            const config = await apiRequest('/admin/api/codec-config');
+            if (!config) return;
+            
+            if (config.sampleRate) {
+                document.getElementById('configSampleRate').value = config.sampleRate;
             }
+            if (config.opusBitrate) {
+                document.getElementById('configBitrate').value = config.opusBitrate;
+            }
+            if (config.frameDuration) {
+                document.getElementById('configFrameDuration').value = config.frameDuration;
+            }
+            if (config.jitterBufferFrames) {
+                document.getElementById('configJitter').value = config.jitterBufferFrames;
+            }
+
+            // 匹配对应的预设模式并高亮
+            for (const [name, preset] of Object.entries(PRESETS)) {
+                if (preset.sampleRate === config.sampleRate &&
+                    preset.bitrate === config.opusBitrate &&
+                    preset.frameDuration === config.frameDuration &&
+                    preset.jitter === config.jitterBufferFrames) {
+                    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+                    document.querySelector(`.preset-btn[data-preset="${name}"]`)?.classList.add('active');
+                    break;
+                }
+            }
+
+            console.log('[Admin] Loaded server config:', config);
         }
 
         function initPresetButtons() {
@@ -526,30 +695,55 @@
                 jitterBufferFrames: parseInt(document.getElementById('configJitter').value)
             };
 
-            try {
-                const res = await fetch('/admin/api/codec-config', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(config)
-                });
-                const data = await res.json();
-                const msgEl = document.getElementById('configMsg');
-                if (data.ok) {
-                    msgEl.textContent = '✅ 配置已更新，新会议将使用此配置';
-                    msgEl.className = 'success-msg';
-                } else {
-                    msgEl.textContent = '❌ ' + (data.message || '配置失败');
-                    msgEl.className = 'error-msg';
-                }
-                msgEl.classList.remove('hidden');
-                setTimeout(() => msgEl.classList.add('hidden'), 3000);
-            } catch (err) {
-                const msgEl = document.getElementById('configMsg');
-                msgEl.textContent = '❌ 配置失败: ' + err.message;
+            const data = await apiRequest('/admin/api/codec-config', {
+                method: 'POST',
+                body: JSON.stringify(config)
+            });
+            if (!data) return;
+            
+            const msgEl = document.getElementById('configMsg');
+            if (data.ok) {
+                msgEl.textContent = '✅ 配置已更新，新会议将使用此配置';
+                msgEl.className = 'success-msg';
+                loadAuditLog();
+            } else {
+                msgEl.textContent = '❌ ' + (data.message || '配置失败');
                 msgEl.className = 'error-msg';
-                msgEl.classList.remove('hidden');
-                setTimeout(() => msgEl.classList.add('hidden'), 3000);
             }
+            msgEl.classList.remove('hidden');
+            setTimeout(() => msgEl.classList.add('hidden'), 3000);
+        }
+
+        // ---- 审计日志 ----
+
+        async function loadAuditLog() {
+            const data = await apiRequest('/admin/api/audit-log');
+            if (!data) return;
+            
+            const listEl = document.getElementById('auditLogList');
+            if (!data.logs || data.logs.length === 0) {
+                listEl.innerHTML = '<span style="color:#666; font-size:12px;">暂无操作日志</span>';
+                return;
+            }
+            
+            listEl.innerHTML = data.logs.map(entry => {
+                const time = new Date(entry.timestamp).toLocaleTimeString('zh-CN', { hour12: false });
+                return `<div class="audit-entry">
+                    <span class="audit-time">[${time}]</span>
+                    <span class="audit-action">${escapeHtml(entry.action)}</span>
+                    <span class="audit-ip">${escapeHtml(entry.ip)}</span>
+                    ${entry.details ? `<span style="color:#888;">— ${escapeHtml(entry.details)}</span>` : ''}
+                </div>`;
+            }).join('');
+            
+            // 滚动到底部（最新日志）
+            listEl.scrollTop = listEl.scrollHeight;
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
         }
     </script>
 </body>
