@@ -482,6 +482,14 @@ const VOICE_APP = (() => {
             if (data.type === 'underrun') {
                 console.warn('[Playback] Buffer underrun');
             }
+
+            if (data.type === 'jitter_adjusted') {
+                // 自适应抖动缓冲调整通知
+                console.log(`[Adaptive] Jitter buffer adjusted: ${data.oldFrames}→${data.newFrames}frames, lossRate=${(data.lossRate*100).toFixed(1)}%`);
+                // 更新 codecConfig 中的 jitterBufferFrames 以反映在UI上
+                codecConfig.jitterBufferFrames = data.newFrames;
+                updateCodecParamsDisplay();
+            }
         };
 
         // 增益控制
