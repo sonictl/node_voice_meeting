@@ -211,6 +211,9 @@ const VOICE_APP = (() => {
                 updateRoomStatus();
                 updatePeerInfoSection();
                 updateDebugInfo();
+
+                // 启用聊天输入
+                enableChat(true);
                 break;
 
             case 'peer_joined':
@@ -804,6 +807,9 @@ const VOICE_APP = (() => {
         // 隐藏麦克风控制按钮
         if (muteBtnEl) muteBtnEl.style.display = 'none';
         isMuted = false;
+
+        // 禁用聊天输入
+        enableChat(false);
     }
 
     // =============================================
@@ -1040,6 +1046,17 @@ const VOICE_APP = (() => {
     // =============================================
     // 文字聊天
     // =============================================
+    function enableChat(enabled) {
+        if (chatInputEl) chatInputEl.disabled = !enabled;
+        if (chatSendBtnEl) chatSendBtnEl.disabled = !enabled;
+        if (enabled && chatInputEl) {
+            chatInputEl.placeholder = '输入消息...';
+            chatInputEl.focus();
+        } else if (chatInputEl) {
+            chatInputEl.placeholder = '加入会议后即可发送消息';
+        }
+    }
+
     function sendChatMessage() {
         if (!chatInputEl || !ws || ws.readyState !== WebSocket.OPEN) return;
         const text = chatInputEl.value.trim();
