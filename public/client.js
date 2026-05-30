@@ -161,8 +161,8 @@ const VOICE_APP = (() => {
             ws.onclose = () => {
                 console.log('[WS] Disconnected');
                 if (isJoined) {
-                    setStatus('🔴 连接断开，5秒后重连...', '#d16969');
-                    setTimeout(() => reconnect(), 5000);
+                    setStatus('🔴 连接断开，2秒后重连...', '#d16969');
+                    setTimeout(() => reconnect(), 2000);
                 } else {
                     setStatus('🔴 断开连接', '#d16969');
                 }
