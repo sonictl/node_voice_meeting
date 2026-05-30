@@ -539,7 +539,7 @@ function handleAdminAPI(req, res) {
                 const validSampleRates = [8000, 16000, 24000, 48000];
                 const validBitrates = [8000, 16000, 32000, 64000];
                 const validFrameDurations = [0.02, 0.04, 0.06, 0.12];
-                const validJitterBuffers = [2, 4, 6, 8];
+                const validJitterBuffers = [2, 4, 6, 8, 10, 12, 16, 20];
                 
                 if (config.sampleRate && !validSampleRates.includes(config.sampleRate)) {
                     return jsonResponse(400, { ok: false, message: '无效的采样率' });
@@ -624,13 +624,14 @@ wss.on('connection', (ws, req) => {
 
     addAuditLog('WS_CONNECT', wsClientIP, 'WebSocket connected');
 
-    // ---- 消息处理 ----
+    // ---- 消息处理（JSON 混淆：所有消息均为 JSON 文本） ----
     ws.on('message', (data, isBinary) => {
         try {
-            if (isBinary) {
-                handleBinaryMessage(ws, peerId, roomId, data);
+            const msg = JSON.parse(data.toString());
+            if (msg.type === 'audio') {
+                // JSON 混淆的音频数据：添加发送者ID后广播
+                handleAudioJsonRelay(ws, peerId, roomId, msg);
             } else {
-                const msg = JSON.parse(data.toString());
                 switch (msg.type) {
                     case 'join':
                         ({ peerId, roomId } = handleJoin(ws, msg, peerId, roomId));
@@ -768,26 +769,17 @@ function handleLeave(ws, peerId, roomId) {
 }
 
 // =============================================
-// 二进制音频数据中继 (SFU模式)
+// JSON 混淆音频数据中继 (SFU模式)
 // =============================================
-function handleBinaryMessage(ws, peerId, roomId, data) {
+function handleAudioJsonRelay(ws, peerId, roomId, msg) {
     if (!peerId || !roomId) {
-        console.warn('[BINARY] Received from unregistered peer');
+        console.warn('[AUDIO] Received from unregistered peer');
         return;
     }
 
-    const senderId = peerId;
-    const senderIdBytes = new TextEncoder().encode(senderId);
-    const senderIdLength = senderIdBytes.length;
-
-    const extendedPacket = new Uint8Array(2 + senderIdLength + data.length);
-    const view = new DataView(extendedPacket.buffer);
-
-    view.setUint16(0, senderIdLength, true);
-    extendedPacket.set(senderIdBytes, 2);
-    extendedPacket.set(data, 2 + senderIdLength);
-
-    broadcastBinaryToRoom(roomId, extendedPacket, peerId);
+    // 添加发送者ID到消息中，然后广播给房间内其他peer
+    msg.p = peerId;
+    broadcastToRoom(roomId, msg, peerId);
 }
 
 // =============================================

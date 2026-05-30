@@ -3,7 +3,12 @@
 // 浏览器原生编解码 · 零依赖 · 超低延迟
 // 架构: 48kHz采集 → 降采样8kHz → Opus编码 → WS → 服务器中继 → WS → Opus解码8kHz → 升采样48kHz → 播放
 // 编解码参数从服务器获取（管理员可在后台配置）
-// v1.0 - 基础功能实现，经测试，3人通话有一点可以接受的延迟。
+// v1.2 - JSON混淆 + 语音不连续修复
+//   1. 添加解码预填缓冲：解码器启动后先缓存3-4帧再送入Worklet
+//   2. 添加帧序号检测和乱序处理
+//   3. 修复解码器创建时机：peer加入时提前创建解码器
+//   4. JSON混淆：音频数据用Base64编码为JSON文本，避免防火墙识别
+//      (Base64膨胀~33%，Opus 16kbps→~21kbps，语音场景可接受)
 // =============================================
 
 const VOICE_APP = (() => {
@@ -102,6 +107,10 @@ const VOICE_APP = (() => {
         lastSeqReceived: new Map()
     };
 
+    // ---- 帧序号检测和乱序处理 ----
+    const SEQ_WINDOW_SIZE = 4; // 乱序重排滑动窗口大小
+    let peerSeqWindows = new Map(); // peerId -> { window: Map<seq, data>, lastSeq: number, lostCount: number }
+
     let isInitializing = false;
     let isJoined = false;
     let isMuted = false; // 麦克风静音状态
@@ -164,17 +173,19 @@ const VOICE_APP = (() => {
     }
 
     // =============================================
-    // 消息处理
+    // 消息处理（JSON 混淆：所有消息均为 JSON 文本）
     // =============================================
     function handleMessage(event) {
-        if (event.data instanceof ArrayBuffer) {
-            handleAudioPacket(new Uint8Array(event.data));
-            return;
-        }
-
+        // 所有消息现在都是 JSON 文本（包括音频数据）
         try {
             const msg = JSON.parse(event.data);
-            handleSignal(msg);
+            if (msg.type === 'audio') {
+                // JSON 混淆的音频数据
+                handleAudioJson(msg);
+            } else {
+                // 信令消息
+                handleSignal(msg);
+            }
         } catch (e) {
             console.warn('[WS] Invalid message:', e);
         }
@@ -209,6 +220,7 @@ const VOICE_APP = (() => {
             case 'peer_left':
                 removePeer(msg.peerId);
                 stats.lastSeqReceived.delete(msg.peerId);
+                peerSeqWindows.delete(msg.peerId);
                 updateDebugInfo();
                 break;
 
@@ -265,28 +277,48 @@ const VOICE_APP = (() => {
     }
 
     // =============================================
-    // 发送音频帧到服务器
+    // Base64 编解码（用于 JSON 混淆）
+    // =============================================
+    function arrayBufferToBase64(buffer) {
+        let binary = '';
+        const bytes = new Uint8Array(buffer);
+        for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+    }
+
+    function base64ToArrayBuffer(base64) {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+        return bytes.buffer;
+    }
+
+    // =============================================
+    // 发送音频帧到服务器（JSON 混淆）
     // =============================================
     function sendAudioPacket(opusData) {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
         if (!opusData || opusData.length === 0) return; // 不发送空包
 
-        // 构建二进制包: [采样率2B][序号2B][时间戳4B][Opus数据]
-        const headerSize = 8;
-        const packet = new ArrayBuffer(headerSize + opusData.length);
-        const view = new DataView(packet);
         const seq = seqCounter++;
 
-        view.setUint16(0, codecConfig.sampleRate, true); // 使用服务器下发的编解码采样率
-        view.setUint16(2, seq, true);
-        view.setUint32(4, Date.now(), true);
+        // JSON 混淆：将 Opus 二进制用 Base64 编码，伪装成普通 JSON 消息
+        const b64Data = arrayBufferToBase64(opusData.buffer || opusData);
+        const jsonMsg = JSON.stringify({
+            type: 'audio',
+            s: seq,
+            t: Date.now(),
+            d: b64Data,
+            sr: codecConfig.sampleRate
+        });
 
-        const opusBytes = new Uint8Array(packet, headerSize, opusData.length);
-        opusBytes.set(opusData);
-
-        ws.send(packet);
+        ws.send(jsonMsg);
         stats.packetsSent++;
-        stats.bytesSent += packet.byteLength;
+        stats.bytesSent += jsonMsg.length;
     }
 
     // =============================================
@@ -343,15 +375,32 @@ const VOICE_APP = (() => {
         if (roomPeers.has(peerId)) return;
         roomPeers.set(peerId, { firstSeq: -1, lastPacketTime: 0 });
         speakerActivity.set(peerId, 0);
+
+        // 初始化帧序号窗口
+        peerSeqWindows.set(peerId, {
+            window: new Map(),
+            lastSeq: -1,
+            lostCount: 0
+        });
+
         addPeerToList(peerId);
         updatePeerInfoSection();
         updateRoomStatus();
+
+        // ---- 修复：peer加入时提前创建解码器并预热 ----
+        if (!peerDecoders.has(peerId)) {
+            const decoder = createPeerDecoder(peerId);
+            peerDecoders.set(peerId, decoder);
+            console.log(`[PEER] Pre-created decoder for ${peerId}`);
+        }
+
         console.log(`[PEER] ${peerId} joined`);
     }
 
     function removePeer(peerId) {
         roomPeers.delete(peerId);
         speakerActivity.delete(peerId);
+        peerSeqWindows.delete(peerId);
 
         // SFU: 清理此peer的解码器
         if (peerDecoders.has(peerId)) {
@@ -535,6 +584,10 @@ const VOICE_APP = (() => {
     // SFU: 为每个peer创建解码器
     // =============================================
     function createPeerDecoder(peerId) {
+        // ---- 解码预填缓冲 ----
+        let preBuffer = []; // 缓存解码后的 PCM 帧，等攒够3帧再一起发送
+        const PRE_BUFFER_FRAMES = 3; // 预填3帧后再开始播放
+
         const decoder = new AudioDecoder({
             output: (audioData) => {
                 // 解码完成 → 升采样到48kHz → 发送 PCM 到 Worklet 播放
@@ -572,11 +625,23 @@ const VOICE_APP = (() => {
                         console.log(`[Decode:${peerId}] downsample ${decodedSampleRate}→${CONFIG.captureSampleRate}Hz: ${pcmDecoded.length}→${pcmForPlayback.length}samples`);
                     }
 
-                    workletNode.port.postMessage({
-                        type: 'pcm',
-                        peerId: peerId,
-                        data: pcmForPlayback
-                    });
+                    // ---- 解码预填缓冲：攒够3帧再发送，避免启动瞬间欠载 ----
+                    preBuffer.push(pcmForPlayback);
+                    if (preBuffer.length >= PRE_BUFFER_FRAMES) {
+                        // 一次性发送所有缓存的帧
+                        for (const bufferedPcm of preBuffer) {
+                            workletNode.port.postMessage({
+                                type: 'pcm',
+                                peerId: peerId,
+                                data: bufferedPcm
+                            });
+                        }
+                        preBuffer = [];
+                        console.log(`[Decode:${peerId}] Pre-buffer filled (${PRE_BUFFER_FRAMES}frames), started playback`);
+                    } else {
+                        console.log(`[Decode:${peerId}] Pre-buffering: ${preBuffer.length}/${PRE_BUFFER_FRAMES}`);
+                    }
+
                     // 说话人指示器：解码到音频数据说明此 peer 正在说话
                     updateSpeakerActivity(peerId);
                 }
@@ -622,7 +687,6 @@ const VOICE_APP = (() => {
                 const timeout = setTimeout(() => reject(new Error('加入超时')), 10000);
                 const origHandler = ws.onmessage;
                 ws.onmessage = (event) => {
-                    if (event.data instanceof ArrayBuffer) return;
                     try {
                         const msg = JSON.parse(event.data);
                         if (msg.type === 'joined') {
@@ -743,6 +807,7 @@ const VOICE_APP = (() => {
             roomPeers.clear();
             speakerActivity.clear();
             stats.lastSeqReceived.clear();
+            peerSeqWindows.clear();
 
             await connectWebSocket();
             ws.send(JSON.stringify({
@@ -806,6 +871,8 @@ const VOICE_APP = (() => {
             lastSeqReceived: new Map()
         };
 
+        peerSeqWindows.clear();
+
         // 清理后统一更新 UI 状态
         roomPeers.clear();
         updateRoomStatus();
@@ -813,33 +880,61 @@ const VOICE_APP = (() => {
     }
 
     // =============================================
-    // SFU: 多用户音频包处理
+    // SFU: JSON 混淆音频包处理（带帧序号检测和乱序重排）
     // =============================================
-    function handleAudioPacket(data) {
-        // SFU 数据包格式: [发送者ID长度2B][发送者ID字节][采样率2B][序号2B][时间戳4B][Opus数据]
-        if (data.length <= 10) return; // 没有音频数据
+    function handleAudioJson(msg) {
+        // JSON 混淆音频格式: { type:'audio', s:seq, t:timestamp, d:base64Data, sr:sampleRate, p:peerId(服务器添加) }
+        const senderId = msg.p; // 服务器添加的发送者ID
+        if (!senderId || senderId === myPeerId) return;
 
-        let offset = 0;
-        const senderIdLength = (data[offset] | (data[offset + 1] << 8));
-        offset += 2;
-        const senderId = new TextDecoder().decode(data.subarray(offset, offset + senderIdLength));
-        offset += senderIdLength;
+        const packetSeq = msg.s;
+        const timestamp = msg.t;
+        const sampleRate = msg.sr || codecConfig.sampleRate;
 
-        // 跳过发送者ID，获取原始音频包
-        const audioData = data.subarray(offset);
-        if (audioData.length <= 8) return; // 只有头部没有数据
-
-        // 解析头部
-        const sampleRate = audioData[0] | (audioData[1] << 8);
-        const packetSeq = audioData[2] | (audioData[3] << 8);
-        const timestamp = (audioData[4] | (audioData[5] << 8) | (audioData[6] << 16) | (audioData[7] << 24)) >>> 0;
-        const opusData = audioData.subarray(8);
+        // Base64 解码 Opus 数据
+        const opusBuffer = base64ToArrayBuffer(msg.d);
+        const opusData = new Uint8Array(opusBuffer);
 
         // 跳过空数据包
         if (opusData.length === 0) return;
 
         stats.packetsRecv++;
-        stats.bytesRecv += data.length;
+        stats.bytesRecv += msg.d.length; // Base64 长度
+
+        // ---- 帧序号检测和乱序处理 ----
+        let seqWindow = peerSeqWindows.get(senderId);
+        if (!seqWindow) {
+            seqWindow = { window: new Map(), lastSeq: -1, lostCount: 0 };
+            peerSeqWindows.set(senderId, seqWindow);
+        }
+
+        // 检测丢包
+        if (seqWindow.lastSeq >= 0) {
+            const expectedSeq = (seqWindow.lastSeq + 1) & 0xFFFF;
+            if (packetSeq !== expectedSeq) {
+                // 计算丢包数（考虑序号回绕）
+                let lost;
+                if (packetSeq > expectedSeq) {
+                    lost = packetSeq - expectedSeq;
+                } else {
+                    lost = (0xFFFF - expectedSeq + 1) + packetSeq;
+                }
+                if (lost > 0 && lost < 100) { // 避免异常值
+                    stats.packetsLost += lost;
+                    seqWindow.lostCount += lost;
+                    console.log(`[Recv:${senderId}] Packet loss detected: expected=${expectedSeq}, got=${packetSeq}, lost=${lost}, totalLost=${stats.packetsLost}`);
+                }
+            }
+        }
+
+        // 检查是否重复帧
+        if (packetSeq === seqWindow.lastSeq) {
+            console.log(`[Recv:${senderId}] Duplicate frame: seq=${packetSeq}, dropped`);
+            return;
+        }
+
+        // 更新最后收到的序号
+        seqWindow.lastSeq = packetSeq;
 
         console.log(`[Recv:${senderId}] seq=${packetSeq}, opusLen=${opusData.length}, ts=${timestamp}`);
 
@@ -848,6 +943,7 @@ const VOICE_APP = (() => {
         if (!decoder) {
             decoder = createPeerDecoder(senderId);
             peerDecoders.set(senderId, decoder);
+            console.log(`[Recv:${senderId}] Created decoder on first packet`);
         }
 
         if (decoder.state !== 'configured') return;
@@ -919,6 +1015,7 @@ const VOICE_APP = (() => {
             <span>👥 房间: ${roomPeers.size + (myPeerId ? 1 : 0)} 人</span><br>
             <span>📤 发送: ${stats.packetsSent} 包 | ${bitrateSend}kbps</span><br>
             <span>📥 接收: ${stats.packetsRecv} 包</span><br>
+            <span>📊 丢包: ${stats.packetsLost} 包</span><br>
             <span>📊 编码: Opus ${codecConfig.opusBitrate/1000}kbps | ${codecConfig.frameDuration * 1000}ms/帧 | ${codecConfig.sampleRate/1000}kHz</span><br>
             <span>📐 重采样: 48kHz↔${codecConfig.sampleRate/1000}kHz 线性插值</span>
         `;

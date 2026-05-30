@@ -2,7 +2,11 @@
 // PCM AudioWorklet - SFU 多用户音频处理
 // 输入: 麦克风捕获(48kHz) → 主线程降采样→编码
 // 输出: 多用户解码PCM(升采样48kHz后)混合 → 扬声器播放
-// v1.1 - 2026-05-03 18:38:49
+// v1.2 - 修复语音不连续问题
+//   1. 环形缓冲区从8帧→20帧 (1200ms)
+//   2. 添加预填机制：填满50%后才开始播放
+//   3. 添加PLC（丢包隐藏）：欠载时重复最后一帧
+//   4. 修复缓冲区大小计算时机
 // =============================================
 
 class VoiceWorklet extends AudioWorkletProcessor {
@@ -16,9 +20,10 @@ class VoiceWorklet extends AudioWorkletProcessor {
         this._captureBuffer = [];
 
         // ---- SFU 播放端参数 ----
-        this._peerBuffers = new Map(); // peerId -> {buffer: Float32Array, write: number, read: number, isReady: boolean}
-        this._jitterBufferFrames = 8;  // 默认8帧，由主线程 config 消息更新
-        this._preBufferFrames = 2;     // 预缓冲帧数：等待2帧数据后再开始播放
+        this._peerBuffers = new Map(); // peerId -> {buffer: Float32Array, write: number, read: number, isReady: boolean, lastFrame: Float32Array, plcCount: number}
+        this._jitterBufferFrames = 20;  // 增加到20帧 (~1200ms)，应对网络抖动
+        this._preBufferRatio = 0.5;     // 预缓冲比例：填满50%后才开始播放
+        this._maxPlcFrames = 5;         // 最大连续PLC帧数（超过则输出静音，避免噪声持续）
 
         // ---- 状态 ----
         this._frameSeq = 0;
@@ -32,7 +37,7 @@ class VoiceWorklet extends AudioWorkletProcessor {
         // 监听主线程消息
         this.port.onmessage = (event) => this._onMessage(event);
 
-        console.log(`[VoiceWorklet:SFU] Init: ${sampleRate}Hz, ${this._frameSamples}samples/frame (default 60ms)`);
+        console.log(`[VoiceWorklet:SFU] Init: ${sampleRate}Hz, ${this._frameSamples}samples/frame (default 60ms), jitter=${this._jitterBufferFrames}frames`);
     }
 
     /**
@@ -97,17 +102,21 @@ class VoiceWorklet extends AudioWorkletProcessor {
             const pcm = data.data; // Float32Array
             if (!(pcm instanceof Float32Array)) return;
 
-            // 获取或创建此peer的环形缓冲区（8帧抖动缓冲）
+            // 获取或创建此peer的环形缓冲区（20帧抖动缓冲）
             let peerBuffer = this._peerBuffers.get(data.peerId);
             if (!peerBuffer) {
+                // 使用当前最新的 _frameSamples 值创建缓冲区
+                const bufferSize = this._frameSamples * this._jitterBufferFrames;
                 peerBuffer = {
-                    buffer: new Float32Array(this._frameSamples * 8), // 8帧缓冲 (~480ms)
+                    buffer: new Float32Array(bufferSize), // 20帧缓冲 (~1200ms)
                     write: 0,
                     read: 0,
-                    isReady: false  // 标记是否已预缓冲完成
+                    isReady: false,      // 标记是否已预缓冲完成
+                    lastFrame: null,     // 最后一帧PCM数据（用于PLC）
+                    plcCount: 0          // 当前连续PLC帧数
                 };
                 this._peerBuffers.set(data.peerId, peerBuffer);
-                console.log(`[VoiceWorklet] Created buffer for peer: ${data.peerId}`);
+                console.log(`[VoiceWorklet] Created buffer for peer: ${data.peerId}, size=${bufferSize}samples (${this._jitterBufferFrames}frames)`);
             }
 
             // 写入环形缓冲区
@@ -116,10 +125,14 @@ class VoiceWorklet extends AudioWorkletProcessor {
                 peerBuffer.write = (peerBuffer.write + 1) % peerBuffer.buffer.length;
             }
 
-            // 检查是否已预缓冲足够数据（2帧 = ~120ms）
+            // 保存最后一帧用于PLC
+            peerBuffer.lastFrame = new Float32Array(pcm);
+            peerBuffer.plcCount = 0; // 收到新数据，重置PLC计数
+
+            // 检查是否已预缓冲足够数据（填满50%）
             if (!peerBuffer.isReady) {
                 const buffered = this._getPeerBufferedSamples(data.peerId);
-                const preBufferSamples = this._frameSamples * this._preBufferFrames;
+                const preBufferSamples = Math.floor(this._frameSamples * this._jitterBufferFrames * this._preBufferRatio);
                 if (buffered >= preBufferSamples) {
                     peerBuffer.isReady = true;
                     console.log(`[VoiceWorklet] Peer ${data.peerId} ready: buffered ${buffered} samples (${(buffered/this._sampleRate*1000).toFixed(0)}ms)`);
@@ -162,16 +175,54 @@ class VoiceWorklet extends AudioWorkletProcessor {
 
     /**
      * 从指定peer缓冲区读取 count 个样本
+     * 如果缓冲区欠载，使用PLC（重复最后一帧）
      */
     _readFromPeerBuffer(peerId, count) {
         const peerBuffer = this._peerBuffers.get(peerId);
         if (!peerBuffer) return new Float32Array(count).fill(0);
 
+        const available = this._getPeerBufferedSamples(peerId);
         const output = new Float32Array(count);
-        for (let i = 0; i < count; i++) {
-            output[i] = peerBuffer.buffer[peerBuffer.read];
-            peerBuffer.read = (peerBuffer.read + 1) % peerBuffer.buffer.length;
+
+        if (available >= count) {
+            // 正常读取
+            for (let i = 0; i < count; i++) {
+                output[i] = peerBuffer.buffer[peerBuffer.read];
+                peerBuffer.read = (peerBuffer.read + 1) % peerBuffer.buffer.length;
+            }
+            // 更新最后一帧（取读取数据的最后一部分作为PLC参考）
+            peerBuffer.lastFrame = new Float32Array(output);
+            peerBuffer.plcCount = 0;
+        } else {
+            // ---- PLC（丢包隐藏）：缓冲区欠载 ----
+            if (peerBuffer.lastFrame && peerBuffer.plcCount < this._maxPlcFrames) {
+                // 重复最后一帧，但逐渐衰减音量避免突兀
+                const decayFactor = Math.max(0.3, 1.0 - peerBuffer.plcCount * 0.15);
+                for (let i = 0; i < count; i++) {
+                    output[i] = peerBuffer.lastFrame[i % peerBuffer.lastFrame.length] * decayFactor;
+                }
+                peerBuffer.plcCount++;
+                console.log(`[VoiceWorklet] PLC for ${peerId}: frame ${peerBuffer.plcCount}, decay=${decayFactor.toFixed(2)}`);
+            } else {
+                // PLC超过最大帧数或没有参考帧，输出静音
+                output.fill(0);
+                if (peerBuffer.plcCount >= this._maxPlcFrames) {
+                    // 长时间无数据，重置为未就绪状态
+                    peerBuffer.isReady = false;
+                    peerBuffer.plcCount = 0;
+                    console.log(`[VoiceWorklet] Peer ${peerId} long underrun, reset to buffering`);
+                }
+            }
+
+            // 如果有部分数据，先读取可用部分
+            if (available > 0) {
+                for (let i = 0; i < available; i++) {
+                    output[i] = peerBuffer.buffer[peerBuffer.read];
+                    peerBuffer.read = (peerBuffer.read + 1) % peerBuffer.buffer.length;
+                }
+            }
         }
+
         return output;
     }
 
@@ -221,19 +272,12 @@ class VoiceWorklet extends AudioWorkletProcessor {
                 // 只有预缓冲完成的peer才参与播放
                 if (!peerBuffer.isReady) continue;
 
-                const available = this._getPeerBufferedSamples(peerId);
-                if (available >= needed) {
-                    const peerAudio = this._readFromPeerBuffer(peerId, needed);
-                    // 混合音频 (简单相加)
-                    for (let i = 0; i < needed; i++) {
-                        mixed[i] += peerAudio[i];
-                    }
-                    activePeers++;
-                } else {
-                    // 缓冲区欠载：重置为未就绪状态，等待重新预缓冲
-                    peerBuffer.isReady = false;
-                    console.log(`[VoiceWorklet] Peer ${peerId} underrun, reset to buffering`);
+                const peerAudio = this._readFromPeerBuffer(peerId, needed);
+                // 混合音频 (简单相加)
+                for (let i = 0; i < needed; i++) {
+                    mixed[i] += peerAudio[i];
                 }
+                activePeers++;
             }
 
             // 音量均衡：多人同时说话时归一化，避免爆音
