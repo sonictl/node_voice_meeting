@@ -118,6 +118,7 @@ const VOICE_APP = (() => {
     // UI 元素
     let statusEl, peersListEl, debugInfoEl, myPeerIdEl, roomStatusEl, roomIdDisplayEl;
     let muteBtnEl;
+    let chatMessagesEl, chatInputEl, chatSendBtnEl;
 
     // =============================================
     // 房间状态管理 (SFU: 支持多用户)
@@ -225,6 +226,13 @@ const VOICE_APP = (() => {
                 break;
 
             case 'pong':
+                break;
+
+            case 'chat':
+                // 收到其他用户发来的聊天消息
+                if (msg.p && msg.text && msg.p !== myPeerId) {
+                    addChatMessage(msg.p, msg.text, msg.t, false);
+                }
                 break;
 
             case 'error':
@@ -1030,6 +1038,65 @@ const VOICE_APP = (() => {
     }
 
     // =============================================
+    // 文字聊天
+    // =============================================
+    function sendChatMessage() {
+        if (!chatInputEl || !ws || ws.readyState !== WebSocket.OPEN) return;
+        const text = chatInputEl.value.trim();
+        if (!text) return;
+
+        ws.send(JSON.stringify({
+            type: 'chat',
+            text: text,
+            t: Date.now()
+        }));
+
+        // 本地显示自己的消息
+        addChatMessage(myPeerId, text, Date.now(), true);
+        chatInputEl.value = '';
+        chatInputEl.focus();
+    }
+
+    function addChatMessage(senderId, text, timestamp, isSelf) {
+        if (!chatMessagesEl) return;
+
+        // 移除占位符
+        const placeholder = chatMessagesEl.querySelector('.chat-placeholder');
+        if (placeholder) placeholder.remove();
+
+        const time = new Date(timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const msgDiv = document.createElement('div');
+        msgDiv.className = 'chat-msg';
+        msgDiv.innerHTML = `
+            <span class="chat-sender ${isSelf ? 'self' : ''}">${isSelf ? '我' : senderId}</span>
+            <span class="chat-text">${escapeHtml(text)}</span>
+            <span class="chat-time">${time}</span>
+        `;
+        chatMessagesEl.appendChild(msgDiv);
+
+        // 自动滚动到底部
+        chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+    }
+
+    function addChatSystemMessage(text) {
+        if (!chatMessagesEl) return;
+        const placeholder = chatMessagesEl.querySelector('.chat-placeholder');
+        if (placeholder) placeholder.remove();
+
+        const msgDiv = document.createElement('div');
+        msgDiv.className = 'chat-msg system';
+        msgDiv.textContent = text;
+        chatMessagesEl.appendChild(msgDiv);
+        chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // =============================================
     // 初始化
     // =============================================
     function init() {
@@ -1044,6 +1111,20 @@ const VOICE_APP = (() => {
         muteBtnEl = document.getElementById('muteBtn');
         if (muteBtnEl) {
             muteBtnEl.onclick = toggleMute;
+        }
+
+        // 聊天 UI
+        chatMessagesEl = document.getElementById('chatMessages');
+        chatInputEl = document.getElementById('chatInput');
+        chatSendBtnEl = document.getElementById('chatSendBtn');
+        if (chatInputEl && chatSendBtnEl) {
+            chatSendBtnEl.onclick = sendChatMessage;
+            chatInputEl.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    sendChatMessage();
+                }
+            };
         }
 
         // 显示当前房间ID

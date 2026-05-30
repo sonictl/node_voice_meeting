@@ -631,6 +631,12 @@ wss.on('connection', (ws, req) => {
             if (msg.type === 'audio') {
                 // JSON 混淆的音频数据：添加发送者ID后广播
                 handleAudioJsonRelay(ws, peerId, roomId, msg);
+            } else if (msg.type === 'chat') {
+                // 文字聊天消息：添加发送者ID后广播
+                if (peerId && roomId) {
+                    msg.p = peerId;
+                    broadcastToRoom(roomId, msg, peerId);
+                }
             } else {
                 switch (msg.type) {
                     case 'join':
